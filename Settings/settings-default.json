@@ -1,0 +1,7 @@
+{
+  "_note": "Rename this file to settings.json before use.",
+  "default_output_dir": "Output",
+  "media_matching_enabled": false,
+  "media_folders": [],
+  "rename_generic_video_filenames": false
+}

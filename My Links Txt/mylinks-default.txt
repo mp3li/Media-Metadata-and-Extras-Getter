@@ -1,0 +1,11 @@
+Example Title
+https://www.amazon.com/gp/video/detail/EXAMPLE123
+
+Another Example
+https://www.netflix.com/title/12345678
+
+Disney+ Example
+https://www.disneyplus.com/browse/entity-00000000-0000-0000-0000-000000000000
+
+Blank lines are fine.
+Text that is not a link is ignored.
