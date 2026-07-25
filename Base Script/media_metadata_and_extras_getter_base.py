@@ -70,7 +70,12 @@ class Metadata:
     source_url: str
     detail_link: str = ""
     source_site: str = ""
+    media_kind: str = "movie"
     title: str = ""
+    show_title: str = ""
+    season_number: str = ""
+    episode_number: str = ""
+    episode_title: str = ""
     original_title: str = ""
     sort_title: str = ""
     plot: str = ""
@@ -140,6 +145,17 @@ class MediaMatch:
     video_path: Path
     filename_base: str
     score: float
+
+
+@dataclass
+class BBCMediaGroup:
+    folder: Path
+    stem: str
+    season: int
+    episode: int
+    episode_id: str = ""
+    episode_name: str = ""
+    files: list[Path] = field(default_factory=list)
 
 
 class UnsupportedProviderError(ValueError):
@@ -225,11 +241,13 @@ def load_provider_script(module_name: str):
 amazon = load_provider_script("amazon")
 netflix = load_provider_script("netflix")
 disneyplus = load_provider_script("disneyplus")
+bbc_iplayer = load_provider_script("bbc_iplayer")
 
 PROVIDER_HANDLERS = [
     ("amazon", amazon.NAME, amazon.is_supported_url),
     ("netflix", netflix.NAME, netflix.is_supported_url),
     ("disneyplus", disneyplus.NAME, disneyplus.is_supported_url),
+    ("bbc_iplayer", bbc_iplayer.NAME, bbc_iplayer.is_supported_url),
 ]
 
 
@@ -246,7 +264,12 @@ def provider_for_url(url: str) -> str:
 def metadata_from_provider_dict(item: dict[str, Any], detail_link: str = "") -> Metadata:
     meta = Metadata(source_url=clean_text(item.get("source_url")) or detail_link, detail_link=detail_link)
     meta.source_site = clean_text(item.get("source_site"))
+    meta.media_kind = clean_text(item.get("media_kind")) or "movie"
     meta.title = clean_text(item.get("title"))
+    meta.show_title = clean_text(item.get("show_title"))
+    meta.season_number = clean_text(item.get("season_number"))
+    meta.episode_number = clean_text(item.get("episode_number"))
+    meta.episode_title = clean_text(item.get("episode_title"))
     meta.original_title = clean_text(item.get("original_title"))
     meta.sort_title = clean_text(item.get("sort_title"))
     meta.plot = clean_text(item.get("plot"))
@@ -340,6 +363,8 @@ def scrape_url(url: str) -> Metadata:
         return metadata_from_provider_dict(netflix.extract_metadata(normalized), detail_link=url)
     if provider == "disneyplus":
         return metadata_from_disneyplus(normalized, detail_link=url)
+    if provider == "bbc_iplayer":
+        return metadata_from_provider_dict(bbc_iplayer.extract_metadata(normalized), detail_link=url)
     raise UnsupportedProviderError(UNSUPPORTED_PROVIDER_MESSAGE)
 
 
@@ -618,6 +643,287 @@ def maybe_rename_generic_video(match: MediaMatch, meta: Metadata, settings: dict
     return MediaMatch(folder=match.folder, video_path=new_path, filename_base=new_base, score=match.score)
 
 
+def bbc_series_enabled(meta: Metadata, settings: dict[str, Any]) -> bool:
+    return (
+        meta.source_site == bbc_iplayer.NAME
+        and meta.media_kind.casefold() == "episode"
+        and bool(settings.get("bbc_series_metadata_enabled", True))
+        and bool(media_search_roots(settings))
+    )
+
+
+def bbc_media_groups(meta: Metadata, settings: dict[str, Any]) -> list[BBCMediaGroup]:
+    wanted_title = normalize_match_key(meta.show_title or meta.title)
+    grouped: dict[tuple[Path, str], BBCMediaGroup] = {}
+    subtitle_extensions = {".srt", ".vtt", ".ass", ".ssa", ".sub"}
+    for root in media_search_roots(settings):
+        if not root.exists():
+            continue
+        for folder_text, _dirs, filenames in os.walk(root):
+            folder = Path(folder_text)
+            for filename in filenames:
+                path = folder / filename
+                if path.suffix.casefold() not in VIDEO_EXTENSIONS | subtitle_extensions:
+                    continue
+                parsed = parse_bbc_media_stem(path.stem)
+                if not parsed:
+                    continue
+                source_title, season, episode, episode_id = parsed
+                title_key = normalize_match_key(source_title)
+                if not (wanted_title and (wanted_title in title_key or title_key in wanted_title)):
+                    continue
+                key = (folder, path.stem)
+                group = grouped.setdefault(
+                    key,
+                    BBCMediaGroup(
+                        folder=folder,
+                        stem=path.stem,
+                        season=season,
+                        episode=episode,
+                        episode_id=episode_id,
+                        episode_name=bbc_filename_episode_name(
+                            path.stem, meta.show_title or meta.title, is_special=(season == 0)
+                        ),
+                    ),
+                )
+                group.files.append(path)
+    completed = [
+        group for group in grouped.values()
+        if not (group.folder / f"{group.stem}.jpg").exists()
+    ]
+    return sorted(completed, key=lambda item: (item.season, item.episode, str(item.folder), item.stem))
+
+
+def parse_bbc_media_stem(stem: str) -> tuple[str, int, int, str] | None:
+    text = re.sub(r"[_]+", " ", stem).strip()
+    downloaded = re.match(
+        r"^(.*?)\s+(?:series|season)\s+(\d+)\s*-\s*(\d+)\.\s*episode\s+\d+\s+([a-z0-9]{8})\s+(?:original|editorial)$",
+        text,
+        flags=re.IGNORECASE,
+    )
+    if downloaded:
+        return downloaded.group(1), int(downloaded.group(2)), int(downloaded.group(3)), downloaded.group(4).casefold()
+    titled_episode = re.match(
+        r"^(.*?)\s+(?:series|season)\s+(\d+)\s*-\s*(\d+)\.\s*.+?\s+([a-z0-9]{8})\s+(?:original|editorial)$",
+        text,
+        flags=re.IGNORECASE,
+    )
+    if titled_episode:
+        return (
+            titled_episode.group(1),
+            int(titled_episode.group(2)),
+            int(titled_episode.group(3)),
+            titled_episode.group(4).casefold(),
+        )
+    getter_series = re.match(
+        r"^(.*?)\s*-\s*S(\d{1,2})E(\d{1,3})\s*-\s+.+?\s+-\s+([a-z0-9]{8})$",
+        text,
+        flags=re.IGNORECASE,
+    )
+    if getter_series:
+        return (
+            getter_series.group(1),
+            int(getter_series.group(2)),
+            int(getter_series.group(3)),
+            getter_series.group(4).casefold(),
+        )
+    special = re.match(
+        r"^(.*?)\s*-\s*(\d+)\.\s*.+?\s+([a-z0-9]{8})\s+(?:original|editorial)$",
+        text,
+        flags=re.IGNORECASE,
+    )
+    if special:
+        return special.group(1), 0, int(special.group(2)), special.group(3).casefold()
+    renamed = re.match(r"^S(\d{1,2})E(\d{1,3})\s+(.+?)(?:\.[a-z]{2,3})?$", text, flags=re.IGNORECASE)
+    if renamed:
+        return renamed.group(3), int(renamed.group(1)), int(renamed.group(2)), ""
+    return None
+
+
+def bbc_filename_episode_name(stem: str, show_title: str, is_special: bool = False) -> str:
+    """Keep the descriptive episode title used by the Get iPlayer naming style."""
+    text = re.sub(r"[_]+", " ", stem).strip()
+    getter_name = re.match(
+        r"^.*?\s*-\s*S\d{1,2}E\d{1,3}\s*-\s+(.+?)\s+-\s+[a-z0-9]{8}$",
+        text,
+        flags=re.IGNORECASE,
+    )
+    if getter_name:
+        descriptive_title = clean_text(getter_name.group(1))
+        series_title, separator, episode_title = descriptive_title.partition(" - ")
+        if not separator:
+            return descriptive_title
+        series_title = re.sub(r"\s*\([^)]*\)\s*$", "", series_title).strip()
+        return " - ".join(part for part in (series_title, episode_title) if part)
+    if is_special:
+        special_name = re.match(
+            r"^.*?\s*-\s*\d+\.\s*(.+?)\s+[a-z0-9]{8}\s+(?:original|editorial)$",
+            text,
+            flags=re.IGNORECASE,
+        )
+        if special_name:
+            return clean_text(special_name.group(1))
+    normalized = re.match(
+        rf"^S\d{{1,2}}E\d{{1,3}}\s+{re.escape(clean_text(show_title))}\s*-\s+(.+?)(?:\.[a-z]{{2,3}})?$",
+        text,
+        flags=re.IGNORECASE,
+    )
+    return clean_text(normalized.group(1)) if normalized else ""
+
+
+def bbc_series_links(meta: Metadata, original_url: str) -> dict[int, str]:
+    links: dict[int, str] = {}
+    for value in meta.extra_fields.get("Available series / collection", []):
+        label, separator, slice_id = value.partition(" | ")
+        match = re.fullmatch(r"Series\s+(\d+)", label, flags=re.IGNORECASE)
+        if not (separator and match and slice_id):
+            continue
+        parsed = urllib.parse.urlsplit(original_url)
+        query = urllib.parse.parse_qs(parsed.query)
+        query["seriesId"] = [slice_id]
+        links[int(match.group(1))] = urllib.parse.urlunsplit(
+            (parsed.scheme or "https", parsed.netloc, parsed.path, urllib.parse.urlencode(query, doseq=True), "")
+        )
+    return links
+
+
+def bbc_resolve_local_episode_ids(
+    groups: list[BBCMediaGroup], meta: Metadata, original_url: str
+) -> None:
+    unresolved_seasons = {item.season for item in groups if not item.episode_id}
+    links = bbc_series_links(meta, original_url)
+    id_by_position: dict[tuple[int, int], str] = {}
+    for season in unresolved_seasons:
+        link = links.get(season)
+        if not link:
+            continue
+        try:
+            cards = bbc_iplayer.fetch_series_episodes(link, timeout=HTTP_TIMEOUT_SECONDS)
+        except Exception:
+            continue
+        for card in cards:
+            subtitle = clean_text(((card.get("subtitle") or {}).get("default"))) if isinstance(card, dict) else ""
+            match = re.search(r"\bSeries\s+(\d+)\s*:\s*Episode\s+(\d+)\b", subtitle, re.IGNORECASE)
+            episode_id = clean_text(card.get("id")) if isinstance(card, dict) else ""
+            if match and episode_id:
+                id_by_position[(int(match.group(1)), int(match.group(2)))] = episode_id
+    for group in groups:
+        if not group.episode_id:
+            group.episode_id = id_by_position.get((group.season, group.episode), "")
+
+
+def bbc_target_base(meta: Metadata, group: BBCMediaGroup) -> str:
+    base = f"S{group.season:02d}E{group.episode:02d} {meta.show_title or meta.title}"
+    if group.episode_name:
+        base += f" - {group.episode_name}"
+    return safe_filename(base)
+
+
+def bbc_subtitle_language(path: Path) -> str:
+    match = re.search(r"(?:^|[._ -])(en|eng|english|cy|wel|welsh|gd|gla)(?:[._ -]|$)", path.stem, re.I)
+    if not match:
+        return "und"
+    return {"eng": "en", "english": "en", "wel": "cy", "welsh": "cy", "gla": "gd"}.get(match.group(1).casefold(), match.group(1).casefold())
+
+
+def prepare_bbc_media_group(meta: Metadata, group: BBCMediaGroup, settings: dict[str, Any]) -> BBCMediaGroup:
+    rename = bool(settings.get("bbc_series_rename_enabled"))
+    organize = bool(settings.get("bbc_series_organize_enabled"))
+    if not (rename or organize):
+        return group
+    destination = group.folder / f"S{group.season:02d}" if organize else group.folder
+    base = bbc_target_base(meta, group) if rename else group.stem
+    targets: list[tuple[Path, Path]] = []
+    used: set[Path] = set()
+    for path in group.files:
+        suffix = path.suffix
+        target_name = base + suffix
+        if suffix.casefold() in {".srt", ".vtt", ".ass", ".ssa", ".sub"} and rename:
+            target_name = f"{base}.{bbc_subtitle_language(path)}{suffix}"
+        target = destination / target_name
+        if target in used or (target.exists() and target not in group.files):
+            raise FileExistsError(f"BBC rename target already exists: {target}")
+        used.add(target)
+        targets.append((path, target))
+    destination.mkdir(parents=True, exist_ok=True)
+    temporary: list[tuple[Path, Path]] = []
+    for index, (source, target) in enumerate(targets, start=1):
+        temp = source.with_name(f".bbc-rename-{index}-{source.name}")
+        source.rename(temp)
+        temporary.append((temp, target))
+    for temp, target in temporary:
+        temp.rename(target)
+    video_files = [target for _temp, target in temporary if target.suffix.casefold() in VIDEO_EXTENSIONS]
+    return BBCMediaGroup(
+        folder=destination,
+        stem=(video_files[0].stem if video_files else base),
+        season=group.season,
+        episode=group.episode,
+        episode_id=group.episode_id,
+        episode_name=group.episode_name,
+        files=[target for _temp, target in temporary],
+    )
+
+
+def save_bbc_series_metadata(
+    meta: Metadata, original_url: str, settings: dict[str, Any], skip_existing: bool = False
+) -> list[Path] | None:
+    if not bbc_series_enabled(meta, settings):
+        return None
+    groups = bbc_media_groups(meta, settings)
+    if not groups:
+        return None
+    bbc_resolve_local_episode_ids(groups, meta, original_url)
+    saved: list[Path] = []
+    unresolved: list[str] = []
+    resolved: list[tuple[BBCMediaGroup, Metadata]] = []
+    for group in groups:
+        if not group.episode_id:
+            unresolved.append(f"S{group.season:02d}E{group.episode:02d}")
+            continue
+        episode_url = bbc_iplayer.canonical_episode_url(group.episode_id)
+        episode_meta = metadata_from_provider_dict(bbc_iplayer.extract_metadata(episode_url), detail_link=episode_url)
+        if group.season == 0:
+            if not (episode_meta.season_number.isdigit() and episode_meta.episode_number.isdigit()):
+                unresolved.append(f"special {group.episode_id} (BBC series placement unavailable)")
+                continue
+            group.season = int(episode_meta.season_number)
+            group.episode = int(episode_meta.episode_number)
+        else:
+            # The user's established Get iPlayer filename numbering is authoritative.
+            episode_meta.media_kind = "episode"
+            episode_meta.show_title = meta.show_title or meta.title
+            episode_meta.season_number = str(group.season)
+            episode_meta.episode_number = str(group.episode)
+        resolved.append((group, episode_meta))
+
+    artwork_saved_for: set[tuple[Path, int]] = set()
+    for group, episode_meta in sorted(resolved, key=lambda item: (item[0].season, item[0].episode, item[0].episode_id)):
+        prepared = prepare_bbc_media_group(episode_meta, group, settings)
+        video = next((path for path in prepared.files if path.suffix.casefold() in VIDEO_EXTENSIONS), None)
+        if not video:
+            unresolved.append(f"S{group.season:02d}E{group.episode:02d} (no video file)")
+            continue
+        artwork_key = (prepared.folder, prepared.season)
+        include_artwork = artwork_key not in artwork_saved_for
+        saved.extend(
+            save_metadata_bundle_to_location(
+                episode_meta,
+                prepared.folder,
+                video.stem,
+                skip_existing=skip_existing,
+                include_artwork=include_artwork,
+                artwork_base_name=f"{episode_meta.show_title or episode_meta.title} - season{prepared.season:02d}",
+            )
+        )
+        if include_artwork:
+            artwork_saved_for.add(artwork_key)
+    if unresolved:
+        print("BBC metadata not saved for: " + ", ".join(unresolved))
+    print(f"BBC series mode found {len(groups)} local episode(s) and saved {len(saved)} item(s).")
+    return saved
+
+
 def output_plan(meta: Metadata, settings: dict[str, Any], explicit_folder: str = "") -> tuple[Path, str]:
     match = find_media_match(meta, settings, explicit_folder=explicit_folder)
     if match:
@@ -633,6 +939,17 @@ def nfo_path(folder: Path, base_name: str) -> Path:
 
 def save_metadata_bundle(meta: Metadata, settings: dict[str, Any], explicit_folder: str = "", skip_existing: bool = False) -> list[Path]:
     folder, base_name = output_plan(meta, settings, explicit_folder=explicit_folder)
+    return save_metadata_bundle_to_location(meta, folder, base_name, skip_existing=skip_existing)
+
+
+def save_metadata_bundle_to_location(
+    meta: Metadata,
+    folder: Path,
+    base_name: str,
+    skip_existing: bool = False,
+    include_artwork: bool = True,
+    artwork_base_name: str = "",
+) -> list[Path]:
     folder.mkdir(parents=True, exist_ok=True)
     if skip_existing and nfo_path(folder, base_name).exists():
         return []
@@ -640,20 +957,23 @@ def save_metadata_bundle(meta: Metadata, settings: dict[str, Any], explicit_fold
     nfo = nfo_path(folder, base_name)
     nfo.write_text(build_nfo(meta), encoding="utf-8")
     saved.append(nfo)
+    if not include_artwork:
+        return saved
+    artwork_base = safe_filename(artwork_base_name) if artwork_base_name else base_name
 
-    poster = download_binary(meta.poster_url, folder / f"{base_name}-poster.jpg")
+    poster = download_binary(meta.poster_url, folder / f"{artwork_base}-poster.jpg")
     if poster:
         saved.append(poster)
-    fanart = download_binary(meta.fanart_url, folder / f"{base_name}-fanart.jpg")
+    fanart = download_binary(meta.fanart_url, folder / f"{artwork_base}-fanart.jpg")
     if fanart:
         saved.append(fanart)
         for suffix in ("-banner.jpg", "-landscape.jpg"):
-            duplicate = folder / f"{base_name}{suffix}"
+            duplicate = folder / f"{artwork_base}{suffix}"
             if not duplicate.exists():
                 shutil.copy2(fanart, duplicate)
             saved.append(duplicate)
     logo_extension = image_extension_from_url(meta.logo_url) or ".png"
-    logo = download_binary(meta.logo_url, folder / f"{base_name}-logo{logo_extension}")
+    logo = download_binary(meta.logo_url, folder / f"{artwork_base}-logo{logo_extension}")
     if logo:
         saved.append(logo)
 
@@ -735,8 +1055,13 @@ def fetch_bytes(url: str) -> bytes | None:
 
 
 def build_nfo(meta: Metadata) -> str:
-    root = ET.Element("movie")
-    add_xml(root, "title", meta.title)
+    is_episode = meta.media_kind.casefold() == "episode"
+    root = ET.Element("episodedetails" if is_episode else "movie")
+    add_xml(root, "title", meta.episode_title if is_episode else meta.title)
+    if is_episode:
+        add_xml(root, "showtitle", meta.show_title or meta.title)
+        add_xml(root, "season", meta.season_number)
+        add_xml(root, "episode", meta.episode_number)
     add_xml(root, "originaltitle", meta.original_title)
     add_xml(root, "sorttitle", meta.sort_title)
     add_xml(root, "outline", meta.outline)
@@ -849,7 +1174,9 @@ def process_import_links(links: list[str], settings: dict[str, Any]) -> None:
         try:
             with AnimatedStatus("Creating your .nfo file and grabbing your trailer/images"):
                 meta = scrape_url(link)
-                saved = save_metadata_bundle(meta, settings)
+                saved = save_bbc_series_metadata(meta, link, settings)
+                if saved is None:
+                    saved = save_metadata_bundle(meta, settings)
         except UnsupportedProviderError as exc:
             print(str(exc))
             continue
@@ -883,7 +1210,9 @@ def process_manual_links(links: list[str], settings: dict[str, Any]) -> None:
             continue
         try:
             with AnimatedStatus("Creating your .nfo file and grabbing your trailer/images"):
-                saved = save_metadata_bundle(meta, settings)
+                saved = save_bbc_series_metadata(meta, link, settings)
+                if saved is None:
+                    saved = save_metadata_bundle(meta, settings)
         except Exception as exc:
             print(f"Could not save {link}: {exc}")
             continue
@@ -903,12 +1232,14 @@ def run_handoff(args: argparse.Namespace, settings: dict[str, Any]) -> int:
     try:
         with AnimatedStatus("Creating your .nfo file and grabbing your trailer/images"):
             meta = scrape_url(detail_link)
-            saved = save_metadata_bundle(
-                meta,
-                settings,
-                explicit_folder=clean_text(args.media_folder),
-                skip_existing=bool(args.skip_existing),
-            )
+            saved = save_bbc_series_metadata(meta, detail_link, settings, skip_existing=bool(args.skip_existing))
+            if saved is None:
+                saved = save_metadata_bundle(
+                    meta,
+                    settings,
+                    explicit_folder=clean_text(args.media_folder),
+                    skip_existing=bool(args.skip_existing),
+                )
     except UnsupportedProviderError as exc:
         print(str(exc))
         return 1

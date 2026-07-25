@@ -8,7 +8,7 @@
   <img alt="Status" src="https://img.shields.io/badge/Status-In_Active_Development-660000?style=flat-square&labelColor=04040c" />
   <img alt="Interface" src="https://img.shields.io/badge/Interface-Terminal-660000?style=flat-square&labelColor=04040c" />
   <img alt="Metadata" src="https://img.shields.io/badge/Metadata-Jellyfin_Style_NFO-660000?style=flat-square&labelColor=04040c" />
-  <img alt="Providers" src="https://img.shields.io/badge/Providers-Amazon_Prime_Netflix_%26_Disney%2B-660000?style=flat-square&labelColor=04040c" />
+  <img alt="Providers" src="https://img.shields.io/badge/Providers-Amazon_Prime%2C_Netflix%2C_Disney%2B_%26_BBC_iPlayer-660000?style=flat-square&labelColor=04040c" />
   <img alt="Downloads" src="https://img.shields.io/badge/Downloads-Artwork%2C_Trailers_%26_Metadata-660000?style=flat-square&labelColor=04040c" />
   <img alt="Bulk Processing" src="https://img.shields.io/badge/Bulk_Processing-Optional-660000?style=flat-square&labelColor=04040c" />
   <img alt="Platform" src="https://img.shields.io/badge/Platform-macOS-660000?style=flat-square&labelColor=04040c" />
@@ -30,6 +30,7 @@
 - [How to Use the Tool](#how-to-use-the-tool)
 - [Importing mylinks.txt](#importing-mylinkstxt)
 - [Settings](#settings)
+- [BBC Series Mode](#bbc-series-mode)
 - [Media Matching](#media-matching)
 - [Output Structure and Naming](#output-structure-and-naming)
 - [Metadata Written to the NFO](#metadata-written-to-the-nfo)
@@ -74,6 +75,7 @@ The current provider scripts support these public detail-page links:
 - Amazon Prime Video detail pages on `amazon.com`
 - Netflix title pages
 - Disney+ browse entity pages
+- BBC iPlayer episode pages, including episodes in a series and one-off programmes such as films or plays
 
 Unsupported providers do not fall back to generic scraping. The tool prints:
 
@@ -105,6 +107,14 @@ Coverage depends on what the provider exposes in the public page data for each i
 - Disney+ entity identifier
 - poster, wide artwork, and logo artwork when exposed
 - a public play link when it is exposed; a saved trailer still depends on that link resolving to a downloadable direct file
+
+### BBC iPlayer
+
+- title, full/medium/short/programme synopses, first broadcast, release date, duration, BBC channel, category, version, availability, and public BBC identifiers when exposed
+- poster, promotional wide image, and promotional image with logo when exposed
+- the complete visible episode-card metadata for the selected series: each episode's title, short synopsis, duration, availability, BBC episode ID, plus the available series/collection selector entries
+- a proper Jellyfin-style `<episodedetails>` NFO for series episodes, including `showtitle`, `season`, and `episode`; one-off programmes continue to use a `<movie>` NFO
+- BBC provides media playback through its own service. This tool only retrieves public page metadata and directly exposed artwork; it is not a BBC downloader.
 
 ## Requirements
 
@@ -259,6 +269,93 @@ Default:
 "rename_generic_video_filenames": false
 ```
 
+### BBC series settings
+
+BBC series processing automatically inspects the files that already exist under `media_folders`. It only retrieves metadata for the BBC episodes it can match there, so a library with four downloaded seasons does not cause the missing fifth season to be fetched.
+
+It recognises BBC-style downloaded names such as:
+
+```text
+The_Great_British_Sewing_Bee_Series_2_-_07._Episode_7_b0405yck_original.mp4
+```
+
+It also recognises the standard series names produced by the user's Get iPlayer workflow, for example:
+
+```text
+One Piece - S02E75 - Alabasta (62-135) - A Hex on Luffy! Colors Trap! - m0021yfg.mp4
+```
+
+When its BBC rename option is enabled, this becomes `S02E75 One Piece - Alabasta - A Hex on Luffy! Colors Trap!.mp4`; the show, series/arc title, and episode title are retained while the BBC ID and a trailing episode-range label such as `(62-135)` are removed.
+
+Both BBC `original` and `editorial` versions are recognised. Downloaded specials without a series number use their public BBC series placement and become the final numbered episode in that series; no artificial `S00` folder is created.
+Their descriptive label is retained, for example `S01E05 The Great British Sewing Bee - Christmas Special.mp4`.
+
+It also recognises the normalized names it produces, such as `S02E07 The Great British Sewing Bee.mp4`, on later runs. BBC series processing is enabled by default when `media_folders` contains a matching local BBC series; a normal single-page save is used when it finds no local matching episodes.
+
+```json
+"bbc_series_metadata_enabled": true,
+"bbc_series_rename_enabled": false,
+"bbc_series_organize_enabled": false
+```
+
+- Set `bbc_series_rename_enabled` to `true` to rename matching local videos to `S01E07 The Great British Sewing Bee.mp4`. Matching subtitle files are renamed alongside the video; when the original filename does not establish the subtitle language, the safe `und` language code is used, for example `S01E07 The Great British Sewing Bee.und.srt`.
+- Set `bbc_series_organize_enabled` to `true` to move the matching video and subtitle files into `S01`, `S02`, and so on within their existing parent folder. Every episode gets its own NFO, while the public BBC artwork bundle is saved only once per season with a show-specific name, such as `The Great British Sewing Bee - season01-poster.jpg` and `The Great British Sewing Bee - season01-fanart.jpg`.
+- Both actions are deliberately opt-in. The tool will not overwrite a conflicting destination filename.
+
+## BBC Series Mode
+
+BBC series mode is designed for a library that already contains the episodes. It does not download video or subtitle media. Instead, it matches the BBC IDs and season/episode numbers in your existing files, retrieves public BBC metadata for those matched episodes, and writes local sidecars beside them.
+
+### Links to provide
+
+Give the tool **one representative BBC iPlayer episode link per show**. You do not need one link per season: one Sewing Bee link can process every locally present Sewing Bee season, while one One Piece link can process every locally present One Piece episode.
+
+For several shows, add one representative link for each show to `My Links Txt/mylinks.txt` and choose import mode. The tool processes the shows one at a time; each link only matches files belonging to that show.
+
+### What it matches
+
+The BBC matcher works within the `media_folders` paths, independently of the ordinary `media_matching_enabled` setting. It recognizes:
+
+- BBC `original` and `editorial` download names
+- BBC download names whose numbered entries use descriptive titles instead of `Episode N`
+- Get iPlayer series names in the form `Title - S02E75 - Series/Arc Title - Episode Title - BBC-ID.ext`
+- the normalized names the BBC rename option produces on a later run
+- BBC specials, using BBC's public placement at the end of their real series
+
+If a same-basename `.jpg` sits beside an otherwise matching BBC media file, the tool treats that as an incomplete download marker and skips the episode until the marker is gone. It never creates a subtitle for a video that has none.
+
+### Metadata and artwork saved
+
+For every matched episode, the tool fetches its own public BBC page data and writes an episode NFO beside the local video. BBC episode NFOs use `<episodedetails>` with `showtitle`, `season`, and `episode`, along with the available full/medium/short synopses, dates, runtime, channel, category, availability, BBC IDs, related episode cards, and available series selectors.
+
+Public BBC poster, wide, banner, landscape, and logo artwork is saved once per populated season rather than once per episode. Its show-specific name prevents collisions in shared folders, for example:
+
+```text
+One Piece - season02-poster.jpg
+One Piece - season02-fanart.jpg
+The Great British Sewing Bee - season01-poster.jpg
+```
+
+### Optional file actions
+
+With both BBC rename and organize settings set to `false`, the source video and subtitle filenames remain untouched. The NFO is written beside the existing video and the season artwork is written in that existing folder.
+
+With `bbc_series_rename_enabled` set to `true`, matching files are renamed as follows:
+
+```text
+S01E07 The Great British Sewing Bee.mp4
+S01E07 The Great British Sewing Bee.und.srt
+
+S02E75 One Piece - Alabasta - A Hex on Luffy! Colors Trap!.mp4
+S02E75 One Piece - Alabasta - A Hex on Luffy! Colors Trap!.und.srt
+
+S01E05 The Great British Sewing Bee - Christmas Special.mp4
+```
+
+The One Piece pattern retains the show, series/arc title, and episode title; it removes only the BBC ID and a trailing range such as `(62-135)`. The Sewing Bee pattern uses the shorter show-only name, except that specials retain their descriptive label.
+
+With `bbc_series_organize_enabled` set to `true`, the matching video, subtitle, NFO, and season artwork are placed under `S01`, `S02`, and so on in their existing parent folder. The tool checks for collisions before renaming or moving files and will not overwrite an existing destination.
+
 ## Media Matching
 
 Media matching is optional and off by default. With it enabled, the tool searches the folders in `media_folders` for video files whose filename or parent folder resembles the scraped title. It supports common video extensions including `.mkv`, `.mp4`, `.m4v`, `.avi`, `.mov`, `.wmv`, `.ts`, `.m2ts`, `.webm`, and `.flv`.
@@ -290,7 +387,7 @@ When media matching finds a local video, the real filename replaces `<title>` in
 
 ## Metadata Written to the NFO
 
-The generated NFO has a `<movie>` root and can include:
+The generated NFO has a `<movie>` root for films/one-off programmes or an `<episodedetails>` root for BBC series episodes, and can include:
 
 - title, original title, sort title, outline, plot, tagline, year, and date
 - runtime, rating, content rating, and language
@@ -327,6 +424,7 @@ Base Script/
 
 Provider Scripts/
   amazon.py
+  bbc_iplayer.py
   disneyplus.py
   netflix.py
 
