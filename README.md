@@ -8,7 +8,7 @@
   <img alt="Status" src="https://img.shields.io/badge/Status-In_Active_Development-660000?style=flat-square&labelColor=04040c" />
   <img alt="Interface" src="https://img.shields.io/badge/Interface-Terminal-660000?style=flat-square&labelColor=04040c" />
   <img alt="Metadata" src="https://img.shields.io/badge/Metadata-Jellyfin_Style_NFO-660000?style=flat-square&labelColor=04040c" />
-  <img alt="Providers" src="https://img.shields.io/badge/Providers-Amazon_Prime%2C_Netflix%2C_Disney%2B_%26_BBC_iPlayer-660000?style=flat-square&labelColor=04040c" />
+  <img alt="Providers" src="https://img.shields.io/badge/Providers-Amazon_Prime%2C_Netflix%2C_Disney%2B%2C_BBC_iPlayer_%26_Paramount%2B-660000?style=flat-square&labelColor=04040c" />
   <img alt="Downloads" src="https://img.shields.io/badge/Downloads-Artwork%2C_Trailers_%26_Metadata-660000?style=flat-square&labelColor=04040c" />
   <img alt="Bulk Processing" src="https://img.shields.io/badge/Bulk_Processing-Optional-660000?style=flat-square&labelColor=04040c" />
   <img alt="Platform" src="https://img.shields.io/badge/Platform-macOS-660000?style=flat-square&labelColor=04040c" />
@@ -37,6 +37,7 @@
 - [Platform Notes](#platform-notes)
 - [Known Limitations](#known-limitations)
 - [Project Structure](#project-structure)
+- [Changelog](CHANGELOG.md)
 - [Responsible Use and Accommodation Disclaimer](#responsible-use-and-accommodation-disclaimer)
 
 </details>
@@ -76,6 +77,7 @@ The current provider scripts support these public detail-page links:
 - Netflix title pages
 - Disney+ browse entity pages
 - BBC iPlayer episode pages, including episodes in a series and one-off programmes such as films or plays
+- Paramount+ show, season, episode, movie, and public clip pages
 
 Unsupported providers do not fall back to generic scraping. The tool prints:
 
@@ -115,6 +117,15 @@ Coverage depends on what the provider exposes in the public page data for each i
 - the complete visible episode-card metadata for the selected series: each episode's title, short synopsis, duration, availability, BBC episode ID, plus the available series/collection selector entries
 - a proper Jellyfin-style `<episodedetails>` NFO for series episodes, including `showtitle`, `season`, and `episode`; one-off programmes continue to use a `<movie>` NFO
 - BBC provides media playback through its own service. This tool only retrieves public page metadata and directly exposed artwork; it is not a BBC downloader.
+
+### Paramount+
+
+- show title, description, genre, year, season count, TV rating, brand, Paramount+ show ID, public episode URLs, and every public season/episode guide entry
+- episode title, season/episode number, synopsis, date, duration where Paramount+ exposes it, public episode ID, and available episode artwork
+- show portrait, wide hero artwork, social artwork, and title logo; for locally matched episodes, all artwork uses that exact video filename as its base, including the full-resolution episode `-thumb.jpg`. Paramount+ does not expose separate season-poster artwork for this show page
+- movie pages add feature-film synopsis, runtime, rating, genre, cast, movie ID, title/logo/hero/brand artwork, and their autoplaying public preview.
+- public clip pages add clip title, synopsis, duration, date, rating, full-resolution artwork, public manifest, and exposed caption status. A clear DASH or HLS manifest is saved only when it contains no DRM declaration; the provider uses ordinary `ffmpeg` remuxing without keys or DRM tooling.
+- the Korra preview currently advertises `CLOSED-CAPTIONS=NONE`; subscription feature/episode playback and any subtitle tracks behind it are not downloaded by this tool.
 
 ## Requirements
 
@@ -261,13 +272,42 @@ Example:
 
 ### `rename_generic_video_filenames`
 
-When enabled, the tool may rename a matching video only if its filename has the narrow generic form `master-...`. It will not replace an existing file.
+When enabled, the tool may rename a matching video only if its filename has the narrow generic form `master-...` or `master_YYYY-MM-DD_HH-MM-SS`. Matching subtitle sidecars are renamed with it, and it will not replace an existing file.
 
 Default:
 
 ```json
 "rename_generic_video_filenames": false
 ```
+
+For a Paramount+ episode URL, a matching generic capture is renamed with the public episode placement. For example, the episode page for `Welcome to Republic City` changes `master_2026-07-24_23-29-44.mp4` to:
+
+```text
+S01E01 The Legend of Korra - Welcome to Republic City.mp4
+```
+
+Use an individual Paramount+ episode URL when naming a generic capture: a show link intentionally lists every episode and a timestamp-only filename does not identify which one was captured. The series guide is used to match episode files that actually exist in your local media folders; it does not create metadata or artwork for missing episodes.
+
+For a local Paramount+ episode, the tool matches common placement forms without requiring the show title: `S01E01`, `S1 E1`, `Season 1 Episode 1`, `Series 1 Episode 1`, `1x01`, and `01-01`. Every saved NFO and image uses that exact local video filename as its base: `Video.mkv`, `Video.nfo`, `Video-poster.jpg`, `Video-fanart.jpg`, `Video-banner.jpg`, `Video-landscape.jpg`, `Video-logo.png`, `Video-thumb.jpg`, and filename-based `extrafanart/` artwork. It leaves videos, subtitles, and existing folder names untouched. A timestamp-only `master_...` file remains intentionally unmatched by a show link; use that episode's individual Paramount+ URL when you want to rename it.
+
+```json
+"paramountplus_series_metadata_enabled": true
+```
+
+Set this to `false` to keep Paramount+ show pages in their ordinary single-page metadata mode.
+
+### Paramount+ movie folders
+
+Paramount+ movie pages use a provider and movie-title folder, with the title and year as the filename base:
+
+```text
+Output/Paramount+/Avatar Aang - The Last Airbender (2026)/
+  Avatar Aang - The Last Airbender (2026).nfo
+  Avatar Aang - The Last Airbender (2026)-poster.jpg
+  Extras/
+```
+
+When media matching finds a Paramount+ movie, the matching video and directly matching subtitle sidecars are moved into that same folder and renamed to `Movie Title (Year)`. The destination is checked first, so an existing file is never replaced. If no local video matches, only the downloaded metadata bundle is saved there.
 
 ### BBC series settings
 
@@ -383,11 +423,13 @@ Output/Example Movie/Extras/Trailers/trailer.mp4
 Output/Example Movie/extrafanart/fanart-01.jpg
 ```
 
+Paramount+ movies are the exception: they save in `Output/Paramount+/Movie Title (Year)/` and use `Movie Title (Year)` for their metadata, artwork, and local matched movie filename.
+
 When media matching finds a local video, the real filename replaces `<title>` in the NFO and artwork names. Available extra videos are saved under `Extras/Videos/`.
 
 ## Metadata Written to the NFO
 
-The generated NFO has a `<movie>` root for films/one-off programmes or an `<episodedetails>` root for BBC series episodes, and can include:
+The generated NFO has a `<movie>` root for films/one-off programmes or an `<episodedetails>` root for BBC and Paramount+ series episodes, and can include:
 
 - title, original title, sort title, outline, plot, tagline, year, and date
 - runtime, rating, content rating, and language
@@ -433,7 +475,13 @@ Settings/
 
 My Links Txt/
   mylinks-default.txt
+
+CHANGELOG.md
 ```
+
+## Changelog
+
+See [CHANGELOG.md](CHANGELOG.md) for the complete published Git history and the current unreleased work.
 
 ## Responsible Use and Accommodation Disclaimer
 

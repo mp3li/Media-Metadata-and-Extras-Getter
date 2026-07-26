@@ -104,6 +104,7 @@ class Metadata:
     extra_fields: dict[str, list[str]] = field(default_factory=dict)
     gallery_urls: list[str] = field(default_factory=list)
     extra_videos: list[ExtraMedia] = field(default_factory=list)
+    series_episodes: list[dict[str, Any]] = field(default_factory=list)
     folder_name_override: str = ""
     warnings: list[str] = field(default_factory=list)
 
@@ -242,12 +243,14 @@ amazon = load_provider_script("amazon")
 netflix = load_provider_script("netflix")
 disneyplus = load_provider_script("disneyplus")
 bbc_iplayer = load_provider_script("bbc_iplayer")
+paramountplus = load_provider_script("paramountplus")
 
 PROVIDER_HANDLERS = [
     ("amazon", amazon.NAME, amazon.is_supported_url),
     ("netflix", netflix.NAME, netflix.is_supported_url),
     ("disneyplus", disneyplus.NAME, disneyplus.is_supported_url),
     ("bbc_iplayer", bbc_iplayer.NAME, bbc_iplayer.is_supported_url),
+    ("paramountplus", paramountplus.NAME, paramountplus.is_supported_url),
 ]
 
 
@@ -287,6 +290,9 @@ def metadata_from_provider_dict(item: dict[str, Any], detail_link: str = "") -> 
     meta.trailer_url = clean_text(item.get("trailer_url"))
     meta.production_label = clean_text(item.get("production_label")) or meta.production_label
     meta.folder_name_override = clean_text(item.get("folder_name_override"))
+    raw_series_episodes = item.get("series_episodes", [])
+    if isinstance(raw_series_episodes, list):
+        meta.series_episodes = [value for value in raw_series_episodes if isinstance(value, dict)]
     meta.add_values("genres", item.get("genres", []))
     meta.add_values("tags", item.get("tags", []))
     meta.add_values("studios", item.get("studios", []))
@@ -365,6 +371,8 @@ def scrape_url(url: str) -> Metadata:
         return metadata_from_disneyplus(normalized, detail_link=url)
     if provider == "bbc_iplayer":
         return metadata_from_provider_dict(bbc_iplayer.extract_metadata(normalized), detail_link=url)
+    if provider == "paramountplus":
+        return metadata_from_provider_dict(paramountplus.extract_metadata(normalized), detail_link=url)
     raise UnsupportedProviderError(UNSUPPORTED_PROVIDER_MESSAGE)
 
 
@@ -620,11 +628,52 @@ def safe_filename(text: str) -> str:
 
 
 def default_folder_name(meta: Metadata) -> str:
+    if is_paramountplus_movie(meta):
+        return paramountplus_movie_name(meta)
     if meta.folder_name_override:
         return safe_filename(meta.folder_name_override)
     if meta.studios and meta.source_site.casefold() != "netflix":
         return safe_filename(f"{meta.title} - {meta.studios[0]}")
     return safe_filename(meta.title)
+
+
+def is_paramountplus_movie(meta: Metadata) -> bool:
+    return meta.source_site == paramountplus.NAME and bool(meta.extra_fields.get("Paramount+ movie ID"))
+
+
+def paramountplus_movie_name(meta: Metadata) -> str:
+    title = safe_filename(meta.title)
+    return safe_filename(f"{title} ({meta.year})") if meta.year.isdigit() else title
+
+
+def organize_paramountplus_movie(match: MediaMatch, meta: Metadata, settings: dict[str, Any]) -> MediaMatch:
+    """Move a matched Paramount+ movie and its matching subtitle sidecars into its requested library folder."""
+    if not is_paramountplus_movie(meta) or not match.video_path.exists():
+        return match
+    base = paramountplus_movie_name(meta)
+    destination = settings_output_dir(settings) / paramountplus.NAME / base
+    source_stem = match.video_path.stem
+    subtitle_extensions = {".srt", ".vtt", ".ass", ".ssa", ".sub"}
+    related_files = [
+        path for path in match.folder.iterdir()
+        if (
+            path.is_file()
+            and path.suffix.casefold() in VIDEO_EXTENSIONS | subtitle_extensions
+            and (path.stem == source_stem or path.name.startswith(source_stem + "."))
+        )
+    ]
+    targets = [
+        destination / (base + path.name[len(source_stem):])
+        for path in related_files
+    ]
+    if any(target.exists() and target not in related_files for target in targets):
+        raise FileExistsError(f"Paramount+ movie destination already exists: {destination}")
+    destination.mkdir(parents=True, exist_ok=True)
+    for source, target in zip(related_files, targets):
+        if source != target:
+            shutil.move(str(source), str(target))
+    video_target = destination / (base + match.video_path.suffix)
+    return MediaMatch(folder=destination, video_path=video_target, filename_base=base, score=match.score)
 
 
 def maybe_rename_generic_video(match: MediaMatch, meta: Metadata, settings: dict[str, Any]) -> MediaMatch:
@@ -633,13 +682,33 @@ def maybe_rename_generic_video(match: MediaMatch, meta: Metadata, settings: dict
     if not match.video_path.exists():
         return match
     stem = match.video_path.stem
-    if not re.fullmatch(r"master-[a-f0-9-]+(?:_\d{4}-\d{2}-\d{2}_\d{2}-\d{2}-\d{2})?", stem):
+    if not re.fullmatch(r"master(?:-[a-f0-9-]+|_\d{4}-\d{2}-\d{2}_\d{2}-\d{2}-\d{2})(?:_\d+)?", stem):
         return match
-    new_base = safe_filename(meta.folder_name_override or meta.title)
+    if (
+        meta.source_site == paramountplus.NAME
+        and meta.media_kind.casefold() == "episode"
+        and meta.season_number.isdigit()
+        and meta.episode_number.isdigit()
+    ):
+        new_base = safe_filename(
+            f"S{int(meta.season_number):02d}E{int(meta.episode_number):02d} "
+            f"{meta.show_title or meta.title} - {meta.episode_title}"
+        )
+    else:
+        new_base = safe_filename(meta.folder_name_override or meta.title)
     new_path = match.video_path.with_name(new_base + match.video_path.suffix)
-    if new_path.exists():
+    related_files = [
+        path for path in match.folder.iterdir()
+        if path.is_file() and (path.stem == stem or path.name.startswith(stem + "."))
+    ]
+    targets = [
+        path.with_name(new_base + path.name[len(stem):])
+        for path in related_files
+    ]
+    if any(target.exists() and target not in related_files for target in targets):
         return match
-    match.video_path.rename(new_path)
+    for path, target in zip(related_files, targets):
+        path.rename(target)
     return MediaMatch(folder=match.folder, video_path=new_path, filename_base=new_base, score=match.score)
 
 
@@ -924,11 +993,153 @@ def save_bbc_series_metadata(
     return saved
 
 
+def paramountplus_series_enabled(meta: Metadata, settings: dict[str, Any]) -> bool:
+    return (
+        meta.source_site == paramountplus.NAME
+        and bool(meta.series_episodes)
+        and bool(settings.get("paramountplus_series_metadata_enabled", True))
+        and bool(media_search_roots(settings))
+    )
+
+
+def paramountplus_local_episode_videos(meta: Metadata, settings: dict[str, Any]) -> list[tuple[Path, dict[str, Any]]]:
+    """Match local videos by a supported season/episode placement from the public guide."""
+    guide = {
+        (int(record["season"]), int(record["episode"])): record
+        for record in meta.series_episodes
+        if clean_text(record.get("season")).isdigit() and clean_text(record.get("episode")).isdigit()
+    }
+    matched: list[tuple[Path, dict[str, Any]]] = []
+    seen: set[Path] = set()
+    for root in media_search_roots(settings):
+        if not root.exists():
+            continue
+        for folder_text, _dirs, filenames in os.walk(root):
+            folder = Path(folder_text)
+            for filename in filenames:
+                video = folder / filename
+                if video.suffix.casefold() not in VIDEO_EXTENSIONS or video in seen:
+                    continue
+                position = paramountplus_episode_position(f"{video.stem} {folder.name}")
+                if not position:
+                    continue
+                record = guide.get(position)
+                if not record:
+                    continue
+                matched.append((video, record))
+                seen.add(video)
+    return sorted(matched, key=lambda item: (item[1]["season"], item[1]["episode"], str(item[0])))
+
+
+def paramountplus_episode_position(text: str) -> tuple[int, int] | None:
+    """Read common local season/episode spellings without requiring a show title."""
+    patterns = (
+        r"(?:^|[^a-z0-9])s(?:eason)?\s*0?(\d{1,2})\s*[-._ ]*e(?:pisode)?\s*0?(\d{1,3})(?:$|[^a-z0-9])",
+        r"(?:^|[^a-z0-9])(?:season|series)\s*0?(\d{1,2})\s*[-._ ]*(?:episode|ep)\s*0?(\d{1,3})(?:$|[^a-z0-9])",
+        r"(?:^|[^a-z0-9])0?(\d{1,2})\s*[xX]\s*0?(\d{1,3})(?:$|[^a-z0-9])",
+        r"(?:^|[^a-z0-9])0?(\d{1,2})\s*[-._]\s*0?(\d{1,3})(?:$|[^a-z0-9])",
+    )
+    for pattern in patterns:
+        match = re.search(pattern, text, re.IGNORECASE)
+        if match:
+            return int(match.group(1)), int(match.group(2))
+    return None
+
+
+def paramountplus_episode_metadata(meta: Metadata, record: dict[str, Any]) -> Metadata:
+    episode_id = clean_text(record.get("id"))
+    episode = Metadata(
+        source_url=clean_text(record.get("url")) or meta.source_url,
+        detail_link=clean_text(record.get("url")),
+        source_site=meta.source_site,
+        media_kind="episode",
+        title=meta.title,
+        show_title=clean_text(record.get("show_title")) or meta.title,
+        season_number=clean_text(record.get("season")),
+        episode_number=clean_text(record.get("episode")),
+        episode_title=clean_text(record.get("title")),
+        outline=clean_text(record.get("description")),
+        plot=clean_text(record.get("description")),
+        year=meta.year,
+        date=clean_text(record.get("date")),
+        runtime_minutes=duration_minutes_text(clean_text(record.get("duration"))),
+        content_rating=meta.content_rating,
+        genres=list(meta.genres),
+        tags=list(meta.tags),
+        studios=list(meta.studios),
+        unique_ids={"paramountplus": episode_id} if episode_id else {},
+    )
+    for label in ("Paramount+ show ID", "Brand", "Season count"):
+        for value in meta.extra_fields.get(label, []):
+            episode.add_extra(label, value)
+    episode.add_extra("Paramount+ episode ID", episode_id)
+    episode.add_extra("Episode page", episode.detail_link)
+    return episode
+
+
+def duration_minutes_text(value: str) -> str:
+    text = clean_text(value)
+    iso = re.fullmatch(r"PT(?:(\d+)H)?(?:(\d+)M)?", text, re.IGNORECASE)
+    if iso:
+        return str(int(iso.group(1) or 0) * 60 + int(iso.group(2) or 0))
+    minutes = re.search(r"(\d+)\s*(?:m|min|minutes?)\b", text, re.IGNORECASE)
+    return minutes.group(1) if minutes else ""
+
+
+def save_paramountplus_series_metadata(
+    meta: Metadata, settings: dict[str, Any], skip_existing: bool = False
+) -> list[Path] | None:
+    if not paramountplus_series_enabled(meta, settings):
+        return None
+    local_episodes = paramountplus_local_episode_videos(meta, settings)
+    if not local_episodes:
+        return None
+    saved: list[Path] = []
+    for video, record in local_episodes:
+        episode_meta = paramountplus_episode_metadata(meta, record)
+        # Keep every saved image tied to the exact local media filename.
+        episode_meta.poster_url = meta.poster_url
+        episode_meta.fanart_url = meta.fanart_url
+        episode_meta.logo_url = meta.logo_url
+        episode_meta.gallery_urls = list(meta.gallery_urls)
+        saved.extend(
+            save_metadata_bundle_to_location(
+                episode_meta,
+                video.parent,
+                video.stem,
+                skip_existing=skip_existing,
+                include_artwork=True,
+                filename_based_gallery=True,
+            )
+        )
+        image_url = clean_text(record.get("image"))
+        thumb = video.with_name(f"{video.stem}-thumb.jpg")
+        if image_url and not thumb.exists():
+            image = download_binary(image_url, thumb)
+            if image:
+                saved.append(image)
+    print(f"Paramount+ series mode found {len(local_episodes)} local episode(s) and saved {len(saved)} item(s).")
+    return saved
+
+
+def save_provider_series_metadata(
+    meta: Metadata, original_url: str, settings: dict[str, Any], skip_existing: bool = False
+) -> list[Path] | None:
+    saved = save_bbc_series_metadata(meta, original_url, settings, skip_existing=skip_existing)
+    if saved is not None:
+        return saved
+    return save_paramountplus_series_metadata(meta, settings, skip_existing=skip_existing)
+
+
 def output_plan(meta: Metadata, settings: dict[str, Any], explicit_folder: str = "") -> tuple[Path, str]:
     match = find_media_match(meta, settings, explicit_folder=explicit_folder)
     if match:
         match = maybe_rename_generic_video(match, meta, settings)
+        match = organize_paramountplus_movie(match, meta, settings)
         return match.folder, match.filename_base
+    if is_paramountplus_movie(meta):
+        base = paramountplus_movie_name(meta)
+        return settings_output_dir(settings) / paramountplus.NAME / base, base
     folder = settings_output_dir(settings) / default_folder_name(meta)
     return folder, safe_filename(meta.folder_name_override or meta.title)
 
@@ -949,6 +1160,7 @@ def save_metadata_bundle_to_location(
     skip_existing: bool = False,
     include_artwork: bool = True,
     artwork_base_name: str = "",
+    filename_based_gallery: bool = False,
 ) -> list[Path]:
     folder.mkdir(parents=True, exist_ok=True)
     if skip_existing and nfo_path(folder, base_name).exists():
@@ -981,7 +1193,33 @@ def save_metadata_bundle_to_location(
         gallery_dir = folder / "extrafanart"
         gallery_dir.mkdir(parents=True, exist_ok=True)
         for index, url in enumerate(meta.gallery_urls, start=1):
-            path = download_binary(url, gallery_dir / f"fanart-{index:02d}.jpg")
+            gallery_name = (
+                f"{artwork_base}-fanart-{index:02d}.jpg"
+                if filename_based_gallery
+                else f"fanart-{index:02d}.jpg"
+            )
+            path = download_binary(url, gallery_dir / gallery_name)
+            if path:
+                saved.append(path)
+
+    if meta.series_episodes and meta.source_site != paramountplus.NAME:
+        episode_art_dir = folder / "Episode Artwork"
+        for record in meta.series_episodes:
+            image_url = clean_text(record.get("image"))
+            season = clean_text(record.get("season"))
+            episode = clean_text(record.get("episode"))
+            title = clean_text(record.get("title"))
+            if not (image_url and season.isdigit() and episode.isdigit() and title):
+                continue
+            name = safe_filename(
+                f"S{int(season):02d}E{int(episode):02d} {meta.title} - {title}"
+            ) + ".jpg"
+            target = episode_art_dir / name
+            if target.exists():
+                saved.append(target)
+                continue
+            episode_art_dir.mkdir(parents=True, exist_ok=True)
+            path = download_binary(image_url, target)
             if path:
                 saved.append(path)
 
@@ -1014,6 +1252,8 @@ def image_extension_from_url(url: str) -> str:
 
 
 def guess_media_extension(url: str) -> str:
+    if is_public_hls_url(url) or is_public_dash_url(url):
+        return ".mp4"
     path = urllib.parse.urlparse(url).path
     suffix = Path(path).suffix
     return suffix if suffix else ".mp4"
@@ -1023,11 +1263,48 @@ def download_binary(url: str, target: Path) -> Path | None:
     text = clean_text(url)
     if not text:
         return None
+    if is_public_hls_url(text):
+        return download_public_hls(text, target)
+    if is_public_dash_url(text):
+        return download_public_dash(text, target)
     data = fetch_bytes(text)
     if data is None:
         return None
     target.write_bytes(data)
     return target
+
+
+def is_public_hls_url(url: str) -> bool:
+    parsed = urllib.parse.urlparse(url)
+    return parsed.path.casefold().endswith(".m3u8") or parsed.netloc.casefold().endswith("splice.paramountplus.com")
+
+
+def is_public_dash_url(url: str) -> bool:
+    return urllib.parse.urlparse(url).path.casefold().endswith(".mpd")
+
+
+def download_public_hls(url: str, target: Path) -> Path | None:
+    """Save an explicitly public, unencrypted HLS preview without keys or DRM tooling."""
+    manifest = fetch_bytes(url)
+    if not manifest or b"#EXTM3U" not in manifest or b"#EXT-X-KEY" in manifest:
+        return None
+    command = [
+        "ffmpeg", "-nostdin", "-y", "-i", url, "-map", "0:v?", "-map", "0:a?", "-c", "copy", str(target),
+    ]
+    result = subprocess.run(command, capture_output=True, check=False)
+    return target if result.returncode == 0 and target.exists() and target.stat().st_size else None
+
+
+def download_public_dash(url: str, target: Path) -> Path | None:
+    """Save a public DASH clip only when its manifest declares no protection."""
+    manifest = fetch_bytes(url)
+    if not manifest or b"<MPD" not in manifest or b"ContentProtection" in manifest or b"pssh" in manifest:
+        return None
+    command = [
+        "ffmpeg", "-nostdin", "-y", "-i", url, "-map", "0:v?", "-map", "0:a?", "-c", "copy", str(target),
+    ]
+    result = subprocess.run(command, capture_output=True, check=False)
+    return target if result.returncode == 0 and target.exists() and target.stat().st_size else None
 
 
 def fetch_bytes(url: str) -> bytes | None:
@@ -1174,7 +1451,7 @@ def process_import_links(links: list[str], settings: dict[str, Any]) -> None:
         try:
             with AnimatedStatus("Creating your .nfo file and grabbing your trailer/images"):
                 meta = scrape_url(link)
-                saved = save_bbc_series_metadata(meta, link, settings)
+                saved = save_provider_series_metadata(meta, link, settings)
                 if saved is None:
                     saved = save_metadata_bundle(meta, settings)
         except UnsupportedProviderError as exc:
@@ -1210,7 +1487,7 @@ def process_manual_links(links: list[str], settings: dict[str, Any]) -> None:
             continue
         try:
             with AnimatedStatus("Creating your .nfo file and grabbing your trailer/images"):
-                saved = save_bbc_series_metadata(meta, link, settings)
+                saved = save_provider_series_metadata(meta, link, settings)
                 if saved is None:
                     saved = save_metadata_bundle(meta, settings)
         except Exception as exc:
@@ -1232,7 +1509,7 @@ def run_handoff(args: argparse.Namespace, settings: dict[str, Any]) -> int:
     try:
         with AnimatedStatus("Creating your .nfo file and grabbing your trailer/images"):
             meta = scrape_url(detail_link)
-            saved = save_bbc_series_metadata(meta, detail_link, settings, skip_existing=bool(args.skip_existing))
+            saved = save_provider_series_metadata(meta, detail_link, settings, skip_existing=bool(args.skip_existing))
             if saved is None:
                 saved = save_metadata_bundle(
                     meta,
