@@ -21,6 +21,7 @@ All notable project changes are documented here. Published entries are derived f
 
 ### Changed
 
+- Individual Crunchyroll watch-page handoffs now ensure a show-level `tvshow.nfo`, poster, backdrop, and logo beside the season folders before saving episode metadata; existing show metadata and artwork are preserved.
 - Crunchyroll series guides are used only to identify locally present episodes; missing episodes do not receive NFO files or artwork.
 - Crunchyroll series pages use `<tvshow>` NFO output, while matched episodes use `<episodedetails>` and preserve the exact ordered rating-tag contract for Jellyfin plugins.
 - Added enabled-by-default Crunchyroll metadata, rename, and organization settings; collision checks and two-phase moves prevent existing destinations from being overwritten.

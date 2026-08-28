@@ -194,6 +194,11 @@ class CrunchyrollProviderTests(unittest.TestCase):
         self.assertEqual(item["extra_fields"]["Air date"], ["2025-10-03T17:00:00Z"])
         self.assertEqual(item["extra_fields"]["Upload date"], ["2025-10-03T18:30:00Z"])
         self.assertNotIn("Premium Only", item["extra_fields"])
+        self.assertEqual(item["series_metadata"]["media_kind"], "series")
+        self.assertEqual(
+            item["series_metadata"]["plot"],
+            "Scarlet has put up with her fiancé’s bullying long enough.",
+        )
 
     def test_series_nfo_uses_tvshow_root(self):
         meta = base.metadata_from_provider_dict(self.extract_series())
@@ -240,6 +245,8 @@ class CrunchyrollProviderTests(unittest.TestCase):
             self.assertTrue((show_folder / "poster.png").exists())
             self.assertTrue((show_folder / "backdrop.png").exists())
             self.assertTrue((show_folder / "logo.png").exists())
+            tvshow_nfo = show_folder / "tvshow.nfo"
+            self.assertTrue(tvshow_nfo.exists())
             self.assertEqual(extract.call_count, 1)
             self.assertFalse(any("EPISODE2" in str(path) for path in saved or []))
 
@@ -248,6 +255,76 @@ class CrunchyrollProviderTests(unittest.TestCase):
             vote_index = tags.index("crunchyrollratings: 15.2k upvotes / 96 downvotes")
             self.assertEqual(tags[vote_index + 1], "crunchyrollrating: 4.8 / 5 from 52,354 ratings")
             self.assertEqual(root.findtext("language"), "Japanese")
+            self.assertEqual(
+                ET.fromstring(tvshow_nfo.read_text(encoding="utf-8")).findtext("plot"),
+                "Scarlet has put up with her fiancé’s bullying long enough.",
+            )
+
+    def test_episode_save_preserves_existing_series_bundle(self):
+        episode_meta = base.metadata_from_provider_dict(self.extract_episode())
+        with tempfile.TemporaryDirectory() as temp:
+            show_folder = Path(temp) / SHOW
+            season_folder = show_folder / "S01"
+            season_folder.mkdir(parents=True)
+            tvshow_nfo = show_folder / "tvshow.nfo"
+            poster = show_folder / "poster.png"
+            tvshow_nfo.write_text("manual series metadata", encoding="utf-8")
+            poster.write_bytes(b"manual poster")
+
+            def fake_download(url: str, target: Path):
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_bytes(b"new image")
+                return target
+
+            with (
+                patch.object(base.crunchyroll, "extract_series_metadata") as extract_series,
+                patch.object(base, "download_binary", side_effect=fake_download),
+            ):
+                base.save_metadata_bundle_to_location(
+                    episode_meta,
+                    season_folder,
+                    base.crunchyroll_target_base(episode_meta),
+                )
+                base.ensure_crunchyroll_series_bundle(episode_meta, show_folder)
+
+            extract_series.assert_not_called()
+            self.assertEqual(tvshow_nfo.read_text(encoding="utf-8"), "manual series metadata")
+            self.assertEqual(poster.read_bytes(), b"manual poster")
+            self.assertTrue((show_folder / "backdrop.png").exists())
+            self.assertTrue((show_folder / "logo.png").exists())
+
+    def test_direct_episode_output_also_saves_linked_series_bundle(self):
+        episode_meta = base.metadata_from_provider_dict(self.extract_episode())
+        with tempfile.TemporaryDirectory() as temp:
+            settings = {"default_output_dir": temp, "media_folders": []}
+
+            def fake_download(url: str, target: Path):
+                if not url:
+                    return None
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_bytes(b"image")
+                return target
+
+            with (
+                patch.object(base.crunchyroll, "extract_series_metadata") as extract_series,
+                patch.object(base, "download_binary", side_effect=fake_download),
+            ):
+                base.save_metadata_bundle(episode_meta, settings)
+
+            extract_series.assert_not_called()
+            show_folder = Path(temp) / base.safe_filename(SHOW)
+            self.assertTrue((show_folder / "tvshow.nfo").exists())
+            self.assertTrue((show_folder / "poster.png").exists())
+            episode_nfo = show_folder / "S01" / f"{base.crunchyroll_target_base(episode_meta)}.nfo"
+            self.assertTrue(episode_nfo.exists())
+            self.assertEqual(
+                ET.fromstring((show_folder / "tvshow.nfo").read_text(encoding="utf-8")).findtext("plot"),
+                "Scarlet has put up with her fiancé’s bullying long enough.",
+            )
+            self.assertEqual(
+                ET.fromstring(episode_nfo.read_text(encoding="utf-8")).findtext("plot"),
+                "When Scarlet's fiancé dumps her at a ball, she requests satisfaction.",
+            )
 
     def test_episode_position_forms(self):
         for text in ("S01E01", "S1 E1", "Season 1 Episode 1", "Series 1 Episode 1", "1x01", "01-01", "E1"):

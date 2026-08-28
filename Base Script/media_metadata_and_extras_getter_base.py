@@ -106,6 +106,7 @@ class Metadata:
     gallery_urls: list[str] = field(default_factory=list)
     extra_videos: list[ExtraMedia] = field(default_factory=list)
     series_episodes: list[dict[str, Any]] = field(default_factory=list)
+    series_metadata: dict[str, Any] = field(default_factory=dict)
     folder_name_override: str = ""
     warnings: list[str] = field(default_factory=list)
 
@@ -306,6 +307,9 @@ def metadata_from_provider_dict(item: dict[str, Any], detail_link: str = "") -> 
     raw_series_episodes = item.get("series_episodes", [])
     if isinstance(raw_series_episodes, list):
         meta.series_episodes = [value for value in raw_series_episodes if isinstance(value, dict)]
+    raw_series_metadata = item.get("series_metadata", {})
+    if isinstance(raw_series_metadata, dict):
+        meta.series_metadata = raw_series_metadata
     meta.add_values("genres", item.get("genres", []))
     meta.add_values("tags", item.get("tags", []))
     meta.add_values("studios", item.get("studios", []))
@@ -1189,6 +1193,44 @@ def save_crunchyroll_show_art(meta: Metadata, folder: Path) -> list[Path]:
     return saved
 
 
+def crunchyroll_show_folder(folder: Path) -> Path:
+    if re.fullmatch(r"S\d{1,2}", folder.name, re.IGNORECASE):
+        return folder.parent
+    return folder
+
+
+def crunchyroll_series_id(meta: Metadata) -> str:
+    values = meta.extra_fields.get("Crunchyroll series ID", [])
+    return clean_text(values[0]) if values else ""
+
+
+def ensure_crunchyroll_series_bundle(episode_meta: Metadata, show_folder: Path) -> list[Path]:
+    """Ensure an episode never stands without its linked show NFO and artwork."""
+    show_folder.mkdir(parents=True, exist_ok=True)
+    tvshow_nfo = show_folder / "tvshow.nfo"
+    if tvshow_nfo.exists():
+        return save_crunchyroll_show_art(episode_meta, show_folder)
+
+    series_item = episode_meta.series_metadata
+    if not series_item:
+        series_id = crunchyroll_series_id(episode_meta)
+        if not series_id:
+            raise ValueError("Crunchyroll episode metadata did not include its linked series ID.")
+        series_url = crunchyroll.canonical_series_url(series_id, "")
+        series_item = crunchyroll.extract_series_metadata(
+            series_id,
+            series_url,
+            timeout=HTTP_TIMEOUT_SECONDS,
+        )
+    series_meta = metadata_from_provider_dict(
+        series_item,
+        detail_link=clean_text(series_item.get("source_url")),
+    )
+    if series_meta.media_kind.casefold() != "series" or not series_meta.plot:
+        raise ValueError("Crunchyroll linked series metadata was incomplete; episode metadata was not saved.")
+    return save_metadata_bundle_to_location(series_meta, show_folder, "tvshow", skip_existing=True)
+
+
 def save_crunchyroll_series_metadata(
     meta: Metadata,
     settings: dict[str, Any],
@@ -1222,6 +1264,10 @@ def save_crunchyroll_series_metadata(
         episode_meta.show_title = meta.show_title or meta.title
         episode_meta.season_number = str(group.season)
         episode_meta.episode_number = str(group.episode)
+        show_folder = crunchyroll_show_folder(group.folder)
+        if show_folder not in artwork_saved_for:
+            saved.extend(ensure_crunchyroll_series_bundle(episode_meta, show_folder))
+            artwork_saved_for.add(show_folder)
         prepared = prepare_crunchyroll_media_group(episode_meta, group, settings)
         video = next((path for path in prepared.files if path.suffix.casefold() in VIDEO_EXTENSIONS), None)
         if not video:
@@ -1236,10 +1282,6 @@ def save_crunchyroll_series_metadata(
             downloaded = download_binary(episode_meta.thumb_url, thumb)
             if downloaded:
                 saved.append(downloaded)
-        show_folder = prepared.folder.parent if re.fullmatch(r"S\d{2}", prepared.folder.name, re.IGNORECASE) else prepared.folder
-        if show_folder not in artwork_saved_for:
-            saved.extend(save_crunchyroll_show_art(episode_meta, show_folder))
-            artwork_saved_for.add(show_folder)
     print(f"Crunchyroll series mode found {len(matches)} local episode(s) and saved {len(saved)} item(s).")
     return saved
 
@@ -1428,7 +1470,11 @@ def nfo_path(folder: Path, base_name: str) -> Path:
 
 def save_metadata_bundle(meta: Metadata, settings: dict[str, Any], explicit_folder: str = "", skip_existing: bool = False) -> list[Path]:
     folder, base_name = output_plan(meta, settings, explicit_folder=explicit_folder)
-    return save_metadata_bundle_to_location(meta, folder, base_name, skip_existing=skip_existing)
+    saved: list[Path] = []
+    if meta.source_site == crunchyroll.NAME and meta.media_kind.casefold() == "episode":
+        saved.extend(ensure_crunchyroll_series_bundle(meta, crunchyroll_show_folder(folder)))
+    saved.extend(save_metadata_bundle_to_location(meta, folder, base_name, skip_existing=skip_existing))
+    return saved
 
 
 def save_metadata_bundle_to_location(

@@ -311,6 +311,8 @@ Set this to `false` to keep Paramount+ show pages in their ordinary single-page 
 
 Crunchyroll series mode is enabled by default and applies the requested BBC-style safe organization rules. It matches only local episodes found under `media_folders`, fetches detailed metadata only for those matches, and never writes guide-only episodes.
 
+An individual Crunchyroll watch link also carries its linked main-series metadata into the save. Before writing the episode, the tool ensures that the series folder has `tvshow.nfo`, `poster`, `backdrop`, and `logo` beside the `S01`, `S02`, and later season folders. Existing show NFO and artwork files are preserved; only missing parts are added.
+
 ```json
 "crunchyroll_series_metadata_enabled": true,
 "crunchyroll_series_rename_enabled": true,
@@ -432,6 +434,7 @@ With the default Crunchyroll settings, a local file is organized like this:
 
 ```text
 May I Ask for One Final Thing/
+  tvshow.nfo
   poster.png
   backdrop.png
   logo.png
@@ -442,7 +445,7 @@ May I Ask for One Final Thing/
     S01E01 May I Ask for One Final Thing - May I Kindly Beat the Tar Out of Those Evil Nobles (Pigs)-thumb.png
 ```
 
-The transparent title image is fetched from Crunchyroll's public key-art endpoint. Series pages saved without local matches use `tvshow.nfo` with the same standard `poster`, `backdrop`, and `logo` artwork names.
+The transparent title image is fetched from Crunchyroll's public key-art endpoint. `tvshow.nfo` contains the main series description and series-level fields, while each NFO inside a season folder contains that episode's description and fields. This hierarchy is created from either a series page or an individual watch page, so a saved episode is never left without its main series metadata.
 
 The episode vote tag and series breakdown tags are adjacent and ordered exactly for Jellyfin plugin consumption:
 

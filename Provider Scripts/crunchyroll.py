@@ -68,9 +68,19 @@ def extract_series_metadata(series_id: str, source_url: str = "", timeout: int =
     if not series_object:
         raise ValueError("Crunchyroll series metadata was not found.")
     series_detail = first_data(api_get(f"series/{series_id}", timeout=timeout))
+    episodes = series_episode_guide(series_id, timeout=timeout)
+    return build_series_metadata(series_id, series_object, series_detail, episodes, source_url=source_url)
+
+
+def build_series_metadata(
+    series_id: str,
+    series_object: dict[str, Any],
+    series_detail: dict[str, Any],
+    episodes: list[dict[str, Any]],
+    source_url: str = "",
+) -> dict[str, Any]:
     nested = as_dict(series_object.get("series_metadata"))
     detail = series_detail or nested
-    episodes = series_episode_guide(series_id, timeout=timeout)
     rating = as_dict(series_object.get("rating"))
     audio_locales = dedupe(detail.get("audio_locales") or nested.get("audio_locales") or [])
     subtitle_locales = dedupe(detail.get("subtitle_locales") or nested.get("subtitle_locales") or [])
@@ -129,6 +139,11 @@ def extract_episode_metadata(episode_id: str, source_url: str = "", timeout: int
     series_object = first_data(api_get(f"objects/{series_id}", timeout=timeout)) if series_id else {}
     series_nested = as_dict(series_object.get("series_metadata"))
     series_detail = first_data(api_get(f"series/{series_id}", timeout=timeout)) if series_id else {}
+    linked_series = (
+        build_series_metadata(series_id, series_object, series_detail, [], source_url=canonical_series_url(series_id, ""))
+        if series_id and series_object
+        else {}
+    )
     title = clean_text(episode_object.get("title") or detail.get("title"))
     show_title = clean_text(detail.get("series_title") or embedded.get("series_title") or series_object.get("title"))
     season = int_value(detail.get("season_number") or embedded.get("season_number")) or 1
@@ -194,6 +209,7 @@ def extract_episode_metadata(episode_id: str, source_url: str = "", timeout: int
         "unique_ids": {},
         "extra_fields": fields,
         "series_episodes": [record] if record else [],
+        "series_metadata": linked_series,
         "folder_name_override": show_title,
     }
 
