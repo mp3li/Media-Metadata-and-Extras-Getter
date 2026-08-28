@@ -1119,6 +1119,34 @@ def crunchyroll_subtitle_language(path: Path, video_stem: str) -> str:
     return match.group(1).casefold() if match else "und"
 
 
+def crunchyroll_subtitle_content(path: Path) -> tuple[str, int]:
+    """Read a text subtitle and count cues without assuming its role from its filename."""
+    try:
+        content = path.read_text(encoding="utf-8-sig", errors="replace")
+    except OSError:
+        return "", 0
+    cue_count = len(
+        re.findall(
+            r"(?m)^\s*(?:\d{1,2}:)?\d{2}:\d{2}[,.]\d{3}\s+-->",
+            content,
+        )
+    )
+    if not cue_count and path.suffix.casefold() in {".ass", ".ssa"}:
+        cue_count = len(re.findall(r"(?mi)^Dialogue\s*:", content))
+    return content, cue_count
+
+
+def crunchyroll_subtitle_role(path: Path, sibling_cue_counts: list[int] | None = None) -> str:
+    """Infer Jellyfin's forced/CC flags only when the subtitle content proves the role."""
+    content, cue_count = crunchyroll_subtitle_content(path)
+    larger_sibling = max(sibling_cue_counts or [0])
+    if 0 < cue_count <= 10 and len(content) <= 5000 and larger_sibling >= max(20, cue_count * 5):
+        return "forced"
+    if re.search(r"(?m)^\s*(?:<[^>]+>)*\[[^]\r\n]{2,80}\]", content):
+        return "cc"
+    return ""
+
+
 def prepare_crunchyroll_media_group(
     meta: Metadata, group: CrunchyrollMediaGroup, settings: dict[str, Any]
 ) -> CrunchyrollMediaGroup:
@@ -1137,13 +1165,37 @@ def prepare_crunchyroll_media_group(
     targets: list[tuple[Path, Path]] = []
     used: set[Path] = set()
     subtitle_extensions = {".srt", ".vtt", ".ass", ".ssa", ".sub"}
+    subtitle_languages = {
+        source: crunchyroll_subtitle_language(source, group.stem)
+        for source in group.files
+        if source.suffix.casefold() in subtitle_extensions
+    }
+    subtitle_cue_counts = {
+        source: crunchyroll_subtitle_content(source)[1]
+        for source in subtitle_languages
+    }
+    discarded_subtitles: list[Path] = []
     for source in group.files:
         if source.suffix.casefold() in subtitle_extensions and rename:
-            language = crunchyroll_subtitle_language(source, group.stem)
-            target = destination / f"{base}.{language}{source.suffix}"
+            language = subtitle_languages[source]
+            sibling_cue_counts = [
+                count
+                for sibling, count in subtitle_cue_counts.items()
+                if sibling != source and subtitle_languages[sibling] == language
+            ]
+            role = crunchyroll_subtitle_role(source, sibling_cue_counts)
+            if role == "forced":
+                discarded_subtitles.append(source)
+                continue
+            subtitle_label = ".".join(value for value in (language, role) if value)
+            target = destination / f"{base}.{subtitle_label}{source.suffix}"
+            duplicate_number = 2
+            while target in used:
+                target = destination / f"{base}.{subtitle_label}.{duplicate_number:02d}{source.suffix}"
+                duplicate_number += 1
         else:
             target = destination / f"{base}{source.suffix}"
-        if target in used or (target.exists() and target not in group.files):
+        if target.exists() and target not in group.files:
             raise FileExistsError(f"Crunchyroll rename target already exists: {target}")
         used.add(target)
         targets.append((source, target))
@@ -1159,6 +1211,9 @@ def prepare_crunchyroll_media_group(
     for temporary_path, target in temporary:
         if temporary_path != target:
             temporary_path.rename(target)
+    for discarded in discarded_subtitles:
+        if discarded.exists():
+            discarded.unlink()
     final_files = [target for _source, target in targets]
     video = next((path for path in final_files if path.suffix.casefold() in VIDEO_EXTENSIONS), None)
     return CrunchyrollMediaGroup(

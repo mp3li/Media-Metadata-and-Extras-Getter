@@ -357,6 +357,50 @@ class CrunchyrollProviderTests(unittest.TestCase):
             self.assertEqual(source.read_bytes(), b"source")
             self.assertEqual(target.read_bytes(), b"existing")
 
+    def test_english_cc_is_kept_and_forced_sign_track_is_discarded(self):
+        episode_meta = base.metadata_from_provider_dict(self.extract_episode())
+        with tempfile.TemporaryDirectory() as temp:
+            folder = Path(temp)
+            stem = f"crunchyroll-{EPISODE_ID}"
+            video = folder / f"{stem}.mkv"
+            captions = folder / f"{stem}.en_us.srt"
+            forced = folder / f"{stem}.en_us.02.srt"
+            video.write_bytes(b"video")
+            captions.write_text(
+                "1\n00:00:00,793 --> 00:00:02,377\n[indistinct chatter]\n\n"
+                + "\n".join(
+                    f"{number}\n00:00:{number:02d},000 --> 00:00:{number:02d},500\nDialogue"
+                    for number in range(2, 26)
+                ),
+                encoding="utf-8",
+            )
+            forced.write_text(
+                "1\n00:05:03,950 --> 00:05:08,960\nMay I Kindly Beat the Tar Out of Those Evil Nobles?\n\n"
+                "2\n00:23:36,020 --> 00:23:40,020\nNext Episode\n",
+                encoding="utf-8",
+            )
+            group = base.CrunchyrollMediaGroup(
+                folder=folder,
+                stem=stem,
+                season=1,
+                episode=1,
+                files=[video, captions, forced],
+            )
+            prepared = base.prepare_crunchyroll_media_group(
+                episode_meta,
+                group,
+                {
+                    "crunchyroll_series_rename_enabled": True,
+                    "crunchyroll_series_organize_enabled": True,
+                },
+            )
+
+            target_base = base.crunchyroll_target_base(episode_meta, group)
+            self.assertEqual(prepared.folder, folder / "S01")
+            self.assertTrue((prepared.folder / f"{target_base}.en.cc.srt").exists())
+            self.assertFalse((prepared.folder / f"{target_base}.en.forced.srt").exists())
+            self.assertFalse(forced.exists())
+
 
 if __name__ == "__main__":
     unittest.main()

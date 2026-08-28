@@ -430,6 +430,8 @@ Provide one Crunchyroll series page to process every locally present episode of 
 
 A same-basename `.jpg` is treated as an incomplete-download marker and causes that media file to be skipped. Videos and subtitle sidecars are moved together; no subtitle is invented when one is absent.
 
+When Crunchyroll supplies both a full same-language accessibility track and a tiny signs/title-card-only track, the full track is retained with Jellyfin's `cc` flag (for example, `.en.cc.srt`) and the proven forced-only track is discarded as requested. Ambiguous distinct subtitle tracks are preserved with collision-safe numbering rather than overwritten.
+
 With the default Crunchyroll settings, a local file is organized like this:
 
 ```text
