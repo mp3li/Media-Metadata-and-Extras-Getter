@@ -337,8 +337,8 @@ class CrunchyrollProviderTests(unittest.TestCase):
             folder = Path(temp)
             source = folder / "E1.mp4"
             source.write_bytes(b"source")
-            season_folder = folder / "S01"
-            season_folder.mkdir()
+            season_folder = folder / base.safe_filename(SHOW) / "S01"
+            season_folder.mkdir(parents=True)
             target = season_folder / f"{base.crunchyroll_target_base(episode_meta)}.mp4"
             target.write_bytes(b"existing")
             group = base.CrunchyrollMediaGroup(
@@ -356,6 +356,46 @@ class CrunchyrollProviderTests(unittest.TestCase):
                 base.prepare_crunchyroll_media_group(episode_meta, group, settings)
             self.assertEqual(source.read_bytes(), b"source")
             self.assertEqual(target.read_bytes(), b"existing")
+
+    def test_shared_download_location_creates_and_reuses_one_series_folder(self):
+        episode_meta = base.metadata_from_provider_dict(self.extract_episode())
+        with tempfile.TemporaryDirectory() as temp:
+            download_folder = Path(temp)
+            first_video = download_folder / "manifest-first.mkv"
+            first_video.write_bytes(b"episode one")
+            first_group = base.CrunchyrollMediaGroup(
+                folder=download_folder,
+                stem=first_video.stem,
+                season=1,
+                episode=1,
+                files=[first_video],
+            )
+            settings = {
+                "crunchyroll_series_rename_enabled": True,
+                "crunchyroll_series_organize_enabled": True,
+            }
+            first_prepared = base.prepare_crunchyroll_media_group(episode_meta, first_group, settings)
+
+            second_video = download_folder / "manifest-second.mkv"
+            second_video.write_bytes(b"episode two")
+            second_meta = base.metadata_from_provider_dict(self.extract_episode())
+            second_meta.episode_number = "2"
+            second_meta.episode_title = "Episode Two"
+            second_group = base.CrunchyrollMediaGroup(
+                folder=download_folder,
+                stem=second_video.stem,
+                season=1,
+                episode=2,
+                files=[second_video],
+            )
+            second_prepared = base.prepare_crunchyroll_media_group(second_meta, second_group, settings)
+
+            show_folder = download_folder / base.safe_filename(SHOW)
+            self.assertEqual(first_prepared.folder, show_folder / "S01")
+            self.assertEqual(second_prepared.folder, show_folder / "S01")
+            self.assertTrue((show_folder / "S01" / f"{base.crunchyroll_target_base(episode_meta, first_group)}.mkv").exists())
+            self.assertTrue((show_folder / "S01" / f"{base.crunchyroll_target_base(second_meta, second_group)}.mkv").exists())
+            self.assertFalse((show_folder / base.safe_filename(SHOW)).exists())
 
     def test_english_cc_is_kept_and_forced_sign_track_is_discarded(self):
         episode_meta = base.metadata_from_provider_dict(self.extract_episode())
@@ -396,7 +436,7 @@ class CrunchyrollProviderTests(unittest.TestCase):
             )
 
             target_base = base.crunchyroll_target_base(episode_meta, group)
-            self.assertEqual(prepared.folder, folder / "S01")
+            self.assertEqual(prepared.folder, folder / base.safe_filename(SHOW) / "S01")
             self.assertTrue((prepared.folder / f"{target_base}.en.cc.srt").exists())
             self.assertFalse((prepared.folder / f"{target_base}.en.forced.srt").exists())
             self.assertFalse(forced.exists())

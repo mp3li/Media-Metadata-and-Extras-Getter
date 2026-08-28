@@ -432,20 +432,23 @@ A same-basename `.jpg` is treated as an incomplete-download marker and causes th
 
 When Crunchyroll supplies both a full same-language accessibility track and a tiny signs/title-card-only track, the full track is retained with Jellyfin's `cc` flag (for example, `.en.cc.srt`) and the proven forced-only track is discarded as requested. Ambiguous distinct subtitle tracks are preserved with collision-safe numbering rather than overwritten.
 
-With the default Crunchyroll settings, a local file is organized like this:
+With the default Crunchyroll settings, the chosen download location is treated as the parent. The tool creates or reuses one series-named folder beneath it, unless the chosen location is already that series folder:
 
 ```text
-May I Ask for One Final Thing/
-  tvshow.nfo
-  poster.png
-  backdrop.png
-  logo.png
-  S01/
-    S01E01 May I Ask for One Final Thing - May I Kindly Beat the Tar Out of Those Evil Nobles (Pigs).mkv
-    S01E01 May I Ask for One Final Thing - May I Kindly Beat the Tar Out of Those Evil Nobles (Pigs).und.srt
-    S01E01 May I Ask for One Final Thing - May I Kindly Beat the Tar Out of Those Evil Nobles (Pigs).nfo
-    S01E01 May I Ask for One Final Thing - May I Kindly Beat the Tar Out of Those Evil Nobles (Pigs)-thumb.png
+Chosen Download Location/
+  May I Ask for One Final Thing/
+    tvshow.nfo
+    poster.png
+    backdrop.png
+    logo.png
+    S01/
+      S01E01 May I Ask for One Final Thing - May I Kindly Beat the Tar Out of Those Evil Nobles (Pigs).mkv
+      S01E01 May I Ask for One Final Thing - May I Kindly Beat the Tar Out of Those Evil Nobles (Pigs).und.srt
+      S01E01 May I Ask for One Final Thing - May I Kindly Beat the Tar Out of Those Evil Nobles (Pigs).nfo
+      S01E01 May I Ask for One Final Thing - May I Kindly Beat the Tar Out of Those Evil Nobles (Pigs)-thumb.png
 ```
+
+Later episodes downloaded into the same parent location reuse that series folder and are routed into their corresponding season folders. A location already named for the series is recognized and is never nested as `Series Name/Series Name/`.
 
 The transparent title image is fetched from Crunchyroll's public key-art endpoint. `tvshow.nfo` contains the main series description and series-level fields, while each NFO inside a season folder contains that episode's description and fields. This hierarchy is created from either a series page or an individual watch page, so a saved episode is never left without its main series metadata.
 

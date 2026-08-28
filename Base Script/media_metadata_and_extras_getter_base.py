@@ -1155,12 +1155,11 @@ def prepare_crunchyroll_media_group(
     if not (rename or organize):
         return group
     season_folder = f"S{group.season:02d}"
-    if organize and re.fullmatch(r"S\d{1,2}", group.folder.name, re.IGNORECASE):
-        destination = group.folder.parent / season_folder
-    elif organize:
-        destination = group.folder / season_folder
-    else:
-        destination = group.folder
+    destination = (
+        crunchyroll_show_folder(group.folder, meta) / season_folder
+        if organize
+        else group.folder
+    )
     base = crunchyroll_target_base(meta, group) if rename else group.stem
     targets: list[tuple[Path, Path]] = []
     used: set[Path] = set()
@@ -1248,10 +1247,12 @@ def save_crunchyroll_show_art(meta: Metadata, folder: Path) -> list[Path]:
     return saved
 
 
-def crunchyroll_show_folder(folder: Path) -> Path:
-    if re.fullmatch(r"S\d{1,2}", folder.name, re.IGNORECASE):
-        return folder.parent
-    return folder
+def crunchyroll_show_folder(folder: Path, meta: Metadata) -> Path:
+    root = folder.parent if re.fullmatch(r"S\d{1,2}", folder.name, re.IGNORECASE) else folder
+    show_name = safe_filename(meta.show_title or meta.title)
+    if normalize_match_key(root.name) == normalize_match_key(show_name):
+        return root
+    return root / show_name
 
 
 def crunchyroll_series_id(meta: Metadata) -> str:
@@ -1319,7 +1320,7 @@ def save_crunchyroll_series_metadata(
         episode_meta.show_title = meta.show_title or meta.title
         episode_meta.season_number = str(group.season)
         episode_meta.episode_number = str(group.episode)
-        show_folder = crunchyroll_show_folder(group.folder)
+        show_folder = crunchyroll_show_folder(group.folder, episode_meta)
         if show_folder not in artwork_saved_for:
             saved.extend(ensure_crunchyroll_series_bundle(episode_meta, show_folder))
             artwork_saved_for.add(show_folder)
@@ -1527,7 +1528,7 @@ def save_metadata_bundle(meta: Metadata, settings: dict[str, Any], explicit_fold
     folder, base_name = output_plan(meta, settings, explicit_folder=explicit_folder)
     saved: list[Path] = []
     if meta.source_site == crunchyroll.NAME and meta.media_kind.casefold() == "episode":
-        saved.extend(ensure_crunchyroll_series_bundle(meta, crunchyroll_show_folder(folder)))
+        saved.extend(ensure_crunchyroll_series_bundle(meta, crunchyroll_show_folder(folder, meta)))
     saved.extend(save_metadata_bundle_to_location(meta, folder, base_name, skip_existing=skip_existing))
     return saved
 
