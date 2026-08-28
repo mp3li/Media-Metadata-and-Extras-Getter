@@ -7,5 +7,8 @@
   "bbc_series_metadata_enabled": true,
   "bbc_series_rename_enabled": false,
   "bbc_series_organize_enabled": false,
-  "paramountplus_series_metadata_enabled": true
+  "paramountplus_series_metadata_enabled": true,
+  "crunchyroll_series_metadata_enabled": true,
+  "crunchyroll_series_rename_enabled": true,
+  "crunchyroll_series_organize_enabled": true
 }

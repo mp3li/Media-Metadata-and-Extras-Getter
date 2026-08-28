@@ -6,6 +6,11 @@ All notable project changes are documented here. Published entries are derived f
 
 ### Added
 
+- Crunchyroll provider for public series and episode/watch pages using Crunchyroll's anonymous public catalog metadata.
+- Crunchyroll portrait poster, wide backdrop, transparent title logo, and smaller episode-thumbnail saving with Jellyfin-standard artwork names.
+- Ordered Jellyfin tags for episode upvotes/downvotes and the exact series average, rating total, and five-to-one-star distribution.
+- Crunchyroll audio, subtitle, sub/dub, advisory, studio, launch year, season tag/count, episode count, exact runtime, original audio, separate air/upload dates, and next-episode metadata.
+- Local-only Crunchyroll series matching with safe video/subtitle renaming and season-folder organization.
 - Paramount+ provider for public show, season, and episode pages.
 - Paramount+ movie and public-clip page support, including cast, movie runtime/rating, clip metadata, and explicit clear-DASH safeguards.
 - Full public season-guide extraction, including episode titles, placements, synopses, dates, IDs, public episode URLs, and exposed durations.
@@ -16,6 +21,9 @@ All notable project changes are documented here. Published entries are derived f
 
 ### Changed
 
+- Crunchyroll series guides are used only to identify locally present episodes; missing episodes do not receive NFO files or artwork.
+- Crunchyroll series pages use `<tvshow>` NFO output, while matched episodes use `<episodedetails>` and preserve the exact ordered rating-tag contract for Jellyfin plugins.
+- Added enabled-by-default Crunchyroll metadata, rename, and organization settings; collision checks and two-phase moves prevent existing destinations from being overwritten.
 - Generic `master_YYYY-MM-DD_HH-MM-SS` captures can be renamed alongside matching subtitle sidecars when generic renaming is enabled and a specific Paramount+ episode link provides an unambiguous title and placement.
 - Paramount+ show guides now match only existing local videos with a supported season/episode placement and save every NFO and image with that exact video filename as its base; missing episodes are never saved.
 - Added the enabled-by-default `paramountplus_series_metadata_enabled` setting for that local-series workflow.

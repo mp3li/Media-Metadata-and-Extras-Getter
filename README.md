@@ -8,7 +8,7 @@
   <img alt="Status" src="https://img.shields.io/badge/Status-In_Active_Development-660000?style=flat-square&labelColor=04040c" />
   <img alt="Interface" src="https://img.shields.io/badge/Interface-Terminal-660000?style=flat-square&labelColor=04040c" />
   <img alt="Metadata" src="https://img.shields.io/badge/Metadata-Jellyfin_Style_NFO-660000?style=flat-square&labelColor=04040c" />
-  <img alt="Providers" src="https://img.shields.io/badge/Providers-Amazon_Prime%2C_Netflix%2C_Disney%2B%2C_BBC_iPlayer_%26_Paramount%2B-660000?style=flat-square&labelColor=04040c" />
+  <img alt="Providers" src="https://img.shields.io/badge/Providers-Amazon%2C_Netflix%2C_Disney%2B%2C_BBC%2C_Paramount%2B_%26_Crunchyroll-660000?style=flat-square&labelColor=04040c" />
   <img alt="Downloads" src="https://img.shields.io/badge/Downloads-Artwork%2C_Trailers_%26_Metadata-660000?style=flat-square&labelColor=04040c" />
   <img alt="Bulk Processing" src="https://img.shields.io/badge/Bulk_Processing-Optional-660000?style=flat-square&labelColor=04040c" />
   <img alt="Platform" src="https://img.shields.io/badge/Platform-macOS-660000?style=flat-square&labelColor=04040c" />
@@ -31,6 +31,7 @@
 - [Importing mylinks.txt](#importing-mylinkstxt)
 - [Settings](#settings)
 - [BBC Series Mode](#bbc-series-mode)
+- [Crunchyroll Series Mode](#crunchyroll-series-mode)
 - [Media Matching](#media-matching)
 - [Output Structure and Naming](#output-structure-and-naming)
 - [Metadata Written to the NFO](#metadata-written-to-the-nfo)
@@ -60,7 +61,7 @@ It is intended for supported provider detail pages. It is not a video downloader
 ## What the Tool Does
 
 - Scrapes supported public detail pages.
-- Builds a local `<movie>` NFO file with Jellyfin-friendly fields.
+- Builds local Jellyfin-friendly `<movie>`, `<tvshow>`, or `<episodedetails>` NFO files as appropriate.
 - Saves the source site, detail page link, and fetched/canonical source URL in the NFO.
 - Downloads available poster, wide, and logo artwork.
 - Saves a downloaded wide image as `fanart`, `banner`, and `landscape` artwork.
@@ -78,6 +79,7 @@ The current provider scripts support these public detail-page links:
 - Disney+ browse entity pages
 - BBC iPlayer episode pages, including episodes in a series and one-off programmes such as films or plays
 - Paramount+ show, season, episode, movie, and public clip pages
+- Crunchyroll series and episode/watch pages
 
 Unsupported providers do not fall back to generic scraping. The tool prints:
 
@@ -126,6 +128,15 @@ Coverage depends on what the provider exposes in the public page data for each i
 - movie pages add feature-film synopsis, runtime, rating, genre, cast, movie ID, title/logo/hero/brand artwork, and their autoplaying public preview.
 - public clip pages add clip title, synopsis, duration, date, rating, full-resolution artwork, public manifest, and exposed caption status. A clear DASH or HLS manifest is saved only when it contains no DRM declaration; the provider uses ordinary `ffmpeg` remuxing without keys or DRM tooling.
 - the Korra preview currently advertises `CLOSED-CAPTIONS=NONE`; subscription feature/episode playback and any subtitle tracks behind it are not downloaded by this tool.
+
+### Crunchyroll
+
+- series title and description, launch year, studio, season tag, season count, episode count, genres, TV rating, audio languages, subtitle languages, sub/dub availability, content advisories, and Crunchyroll series ID
+- the visible average rating plus its exact rating total and the five-to-one-star distribution as ordered Jellyfin tags
+- episode title, placement, description, release date, separate air/upload timestamps, exact runtime, original audio, audio/subtitle availability, advisories, next-episode details, and live upvote/downvote totals
+- the tall portrait image as Jellyfin `poster`, the wide image as `backdrop`, the transparent title art as `logo`, and a smaller 640-pixel episode rendition as `-thumb`
+- every public guide entry is used only as a lookup table; detailed episode metadata, NFOs, and thumbnails are fetched and saved only for episodes that actually exist in the configured local folders
+- Crunchyroll subscription video is not downloaded. This provider retrieves public catalog metadata and artwork only.
 
 ## Requirements
 
@@ -296,6 +307,21 @@ For a local Paramount+ episode, the tool matches common placement forms without 
 
 Set this to `false` to keep Paramount+ show pages in their ordinary single-page metadata mode.
 
+### Crunchyroll series settings
+
+Crunchyroll series mode is enabled by default and applies the requested BBC-style safe organization rules. It matches only local episodes found under `media_folders`, fetches detailed metadata only for those matches, and never writes guide-only episodes.
+
+```json
+"crunchyroll_series_metadata_enabled": true,
+"crunchyroll_series_rename_enabled": true,
+"crunchyroll_series_organize_enabled": true
+```
+
+- `crunchyroll_series_rename_enabled` renames the matched video and its subtitle sidecars to `S01E01 Show Title - Episode Title`. A subtitle without a recognizable language suffix receives `.und`.
+- `crunchyroll_series_organize_enabled` places those files under `S01`, `S02`, and so on without nesting an existing season directory.
+- Both operations validate every destination before a two-phase rename, so an existing conflicting file is never replaced.
+- Set either file-action setting to `false` if you want metadata without that action. Set `crunchyroll_series_metadata_enabled` to `false` to use normal single-page output instead.
+
 ### Paramount+ movie folders
 
 Paramount+ movie pages use a provider and movie-title folder, with the title and year as the filename base:
@@ -396,6 +422,42 @@ The One Piece pattern retains the show, series/arc title, and episode title; it 
 
 With `bbc_series_organize_enabled` set to `true`, the matching video, subtitle, NFO, and season artwork are placed under `S01`, `S02`, and so on in their existing parent folder. The tool checks for collisions before renaming or moving files and will not overwrite an existing destination.
 
+## Crunchyroll Series Mode
+
+Provide one Crunchyroll series page to process every locally present episode of that show, or provide one episode/watch page for a specific file. The matcher recognizes `S01E01`, `S1 E1`, `Season 1 Episode 1`, `Series 1 Episode 1`, `1x01`, `01-01`, and season-one forms such as `E1`. Outside an explicit handoff folder, the show title must also occur in the local path to prevent an episode number from matching another series.
+
+A same-basename `.jpg` is treated as an incomplete-download marker and causes that media file to be skipped. Videos and subtitle sidecars are moved together; no subtitle is invented when one is absent.
+
+With the default Crunchyroll settings, a local file is organized like this:
+
+```text
+May I Ask for One Final Thing/
+  poster.png
+  backdrop.png
+  logo.png
+  S01/
+    S01E01 May I Ask for One Final Thing - May I Kindly Beat the Tar Out of Those Evil Nobles (Pigs).mkv
+    S01E01 May I Ask for One Final Thing - May I Kindly Beat the Tar Out of Those Evil Nobles (Pigs).und.srt
+    S01E01 May I Ask for One Final Thing - May I Kindly Beat the Tar Out of Those Evil Nobles (Pigs).nfo
+    S01E01 May I Ask for One Final Thing - May I Kindly Beat the Tar Out of Those Evil Nobles (Pigs)-thumb.png
+```
+
+The transparent title image is fetched from Crunchyroll's public key-art endpoint. Series pages saved without local matches use `tvshow.nfo` with the same standard `poster`, `backdrop`, and `logo` artwork names.
+
+The episode vote tag and series breakdown tags are adjacent and ordered exactly for Jellyfin plugin consumption:
+
+```xml
+<tag>crunchyrollratings: 15.2k upvotes / 96 downvotes</tag>
+<tag>crunchyrollrating: 4.8 / 5 from 52,358 ratings</tag>
+<tag>crunchyrollrating5stars: 44.6k / 86%</tag>
+<tag>crunchyrollrating4stars: 4.7k / 10%</tag>
+<tag>crunchyrollrating3stars: 1.7k / 4%</tag>
+<tag>crunchyrollrating2stars: 556 / 2%</tag>
+<tag>crunchyrollrating1star: 676 / 2%</tag>
+```
+
+These are live values and can change between runs; the tag names and ordering remain fixed.
+
 ## Media Matching
 
 Media matching is optional and off by default. With it enabled, the tool searches the folders in `media_folders` for video files whose filename or parent folder resembles the scraped title. It supports common video extensions including `.mkv`, `.mp4`, `.m4v`, `.avi`, `.mov`, `.wmv`, `.ts`, `.m2ts`, `.webm`, and `.flv`.
@@ -429,7 +491,7 @@ When media matching finds a local video, the real filename replaces `<title>` in
 
 ## Metadata Written to the NFO
 
-The generated NFO has a `<movie>` root for films/one-off programmes or an `<episodedetails>` root for BBC and Paramount+ series episodes, and can include:
+The generated NFO has a `<movie>` root for films/one-off programmes, a `<tvshow>` root for Crunchyroll series pages, or an `<episodedetails>` root for matched episodes, and can include:
 
 - title, original title, sort title, outline, plot, tagline, year, and date
 - runtime, rating, content rating, and language
@@ -467,8 +529,13 @@ Base Script/
 Provider Scripts/
   amazon.py
   bbc_iplayer.py
+  crunchyroll.py
   disneyplus.py
   netflix.py
+  paramountplus.py
+
+Tests/
+  test_crunchyroll.py
 
 Settings/
   settings-default.json

@@ -7,5 +7,8 @@ https://www.netflix.com/title/12345678
 Disney+ Example
 https://www.disneyplus.com/browse/entity-00000000-0000-0000-0000-000000000000
 
+Crunchyroll Series Example
+https://www.crunchyroll.com/series/GW4HM7WQ5/may-i-ask-for-one-final-thing
+
 Blank lines are fine.
 Text that is not a link is ignored.

@@ -90,6 +90,7 @@ class Metadata:
     poster_url: str = ""
     fanart_url: str = ""
     logo_url: str = ""
+    thumb_url: str = ""
     trailer_url: str = ""
     production_label: str = "Production/Studio"
     genres: list[str] = field(default_factory=list)
@@ -156,6 +157,15 @@ class BBCMediaGroup:
     episode: int
     episode_id: str = ""
     episode_name: str = ""
+    files: list[Path] = field(default_factory=list)
+
+
+@dataclass
+class CrunchyrollMediaGroup:
+    folder: Path
+    stem: str
+    season: int
+    episode: int
     files: list[Path] = field(default_factory=list)
 
 
@@ -244,6 +254,7 @@ netflix = load_provider_script("netflix")
 disneyplus = load_provider_script("disneyplus")
 bbc_iplayer = load_provider_script("bbc_iplayer")
 paramountplus = load_provider_script("paramountplus")
+crunchyroll = load_provider_script("crunchyroll")
 
 PROVIDER_HANDLERS = [
     ("amazon", amazon.NAME, amazon.is_supported_url),
@@ -251,6 +262,7 @@ PROVIDER_HANDLERS = [
     ("disneyplus", disneyplus.NAME, disneyplus.is_supported_url),
     ("bbc_iplayer", bbc_iplayer.NAME, bbc_iplayer.is_supported_url),
     ("paramountplus", paramountplus.NAME, paramountplus.is_supported_url),
+    ("crunchyroll", crunchyroll.NAME, crunchyroll.is_supported_url),
 ]
 
 
@@ -287,6 +299,7 @@ def metadata_from_provider_dict(item: dict[str, Any], detail_link: str = "") -> 
     meta.poster_url = clean_text(item.get("poster_url"))
     meta.fanart_url = clean_text(item.get("fanart_url"))
     meta.logo_url = clean_text(item.get("logo_url"))
+    meta.thumb_url = clean_text(item.get("thumb_url"))
     meta.trailer_url = clean_text(item.get("trailer_url"))
     meta.production_label = clean_text(item.get("production_label")) or meta.production_label
     meta.folder_name_override = clean_text(item.get("folder_name_override"))
@@ -373,6 +386,8 @@ def scrape_url(url: str) -> Metadata:
         return metadata_from_provider_dict(bbc_iplayer.extract_metadata(normalized), detail_link=url)
     if provider == "paramountplus":
         return metadata_from_provider_dict(paramountplus.extract_metadata(normalized), detail_link=url)
+    if provider == "crunchyroll":
+        return metadata_from_provider_dict(crunchyroll.extract_metadata(normalized), detail_link=url)
     raise UnsupportedProviderError(UNSUPPORTED_PROVIDER_MESSAGE)
 
 
@@ -435,6 +450,7 @@ def clean_final_metadata(meta: Metadata) -> None:
 
 
 def format_preview(meta: Metadata) -> str:
+    crunchyroll_art = meta.source_site == crunchyroll.NAME
     rows = [
         ("Source Site", meta.source_site),
         ("Detail Link Given", meta.detail_link),
@@ -455,9 +471,10 @@ def format_preview(meta: Metadata) -> str:
         ("Writer", join_list(meta.writers)),
         ("Credits/Producer", join_list(meta.credits)),
         ("Cast", format_cast(meta.actors)),
-        ("Cover Art", found_status(meta.poster_url)),
-        ("Wide Art", wide_art_status(meta.fanart_url)),
+        ("Poster" if crunchyroll_art else "Cover Art", found_status(meta.poster_url)),
+        ("Backdrop" if crunchyroll_art else "Wide Art", found_status(meta.fanart_url) if crunchyroll_art else wide_art_status(meta.fanart_url)),
         ("Logo", found_status(meta.logo_url)),
+        ("Thumbnail" if crunchyroll_art else "Episode Thumbnail", found_status(meta.thumb_url)),
         ("Gallery", count_status(meta.gallery_urls, "image")),
         ("Extra Videos", count_status(meta.extra_videos, "video")),
         ("Trailer", found_status(meta.trailer_url)),
@@ -993,6 +1010,240 @@ def save_bbc_series_metadata(
     return saved
 
 
+def crunchyroll_series_enabled(
+    meta: Metadata, settings: dict[str, Any], explicit_folder: str = ""
+) -> bool:
+    return (
+        meta.source_site == crunchyroll.NAME
+        and meta.media_kind.casefold() in {"series", "episode"}
+        and bool(meta.series_episodes)
+        and bool(settings.get("crunchyroll_series_metadata_enabled", True))
+        and bool(explicit_folder or media_search_roots(settings))
+    )
+
+
+def crunchyroll_episode_position(text: str) -> tuple[int, int] | None:
+    """Read common local anime season/episode spellings, including an E-only season-one form."""
+    position = paramountplus_episode_position(text)
+    if position:
+        return position
+    match = re.search(
+        r"(?:^|[^a-z0-9])(?:episode|ep|e)\s*0?(\d{1,3})(?:$|[^a-z0-9])",
+        text,
+        re.IGNORECASE,
+    )
+    return (1, int(match.group(1))) if match else None
+
+
+def crunchyroll_target_base(meta: Metadata, group: CrunchyrollMediaGroup | None = None) -> str:
+    season = group.season if group else int(meta.season_number or 1)
+    episode = group.episode if group else int(meta.episode_number or 0)
+    show = meta.show_title or meta.title
+    title = meta.episode_title
+    base = f"S{season:02d}E{episode:02d} {show}"
+    if title:
+        base += f" - {title}"
+    return safe_filename(base)
+
+
+def crunchyroll_media_groups(
+    meta: Metadata, settings: dict[str, Any], explicit_folder: str = ""
+) -> list[tuple[CrunchyrollMediaGroup, dict[str, Any]]]:
+    guide = {
+        (int(record["season"]), int(record["episode"])): record
+        for record in meta.series_episodes
+        if clean_text(record.get("season")).isdigit() and clean_text(record.get("episode")).isdigit()
+    }
+    roots = [Path(explicit_folder).expanduser()] if explicit_folder else media_search_roots(settings)
+    candidates: list[Path] = []
+    for root in roots:
+        if not root.exists():
+            continue
+        if root.is_file() and root.suffix.casefold() in VIDEO_EXTENSIONS:
+            candidates.append(root)
+            continue
+        for folder_text, _dirs, filenames in os.walk(root):
+            candidates.extend(
+                Path(folder_text) / filename
+                for filename in filenames
+                if Path(filename).suffix.casefold() in VIDEO_EXTENSIONS
+            )
+    wanted_title = normalize_match_key(meta.show_title or meta.title)
+    direct_position = None
+    if meta.media_kind.casefold() == "episode" and meta.season_number.isdigit() and meta.episode_number.isdigit():
+        direct_position = (int(meta.season_number), int(meta.episode_number))
+    matched: list[tuple[CrunchyrollMediaGroup, dict[str, Any]]] = []
+    for video in sorted(set(candidates)):
+        if not explicit_folder:
+            path_key = normalize_match_key(str(video))
+            if wanted_title and wanted_title not in path_key:
+                continue
+        position = crunchyroll_episode_position(f"{video.stem} {video.parent.name}")
+        if not position and explicit_folder and len(candidates) == 1:
+            position = direct_position
+        record = guide.get(position) if position else None
+        if not (position and record):
+            continue
+        if video.with_suffix(".jpg").exists():
+            continue
+        files = [video]
+        for sidecar in video.parent.iterdir():
+            if (
+                sidecar.is_file()
+                and sidecar.suffix.casefold() in {".srt", ".vtt", ".ass", ".ssa", ".sub"}
+                and (sidecar.stem == video.stem or sidecar.name.startswith(video.stem + "."))
+            ):
+                files.append(sidecar)
+        matched.append(
+            (
+                CrunchyrollMediaGroup(
+                    folder=video.parent,
+                    stem=video.stem,
+                    season=position[0],
+                    episode=position[1],
+                    files=files,
+                ),
+                record,
+            )
+        )
+    return sorted(matched, key=lambda item: (item[0].season, item[0].episode, str(item[0].folder)))
+
+
+def crunchyroll_subtitle_language(path: Path, video_stem: str) -> str:
+    suffix_text = path.name[len(video_stem):]
+    match = re.match(r"[._ -]([a-z]{2,3}(?:-[a-z]{2})?)[._ -]", suffix_text, re.IGNORECASE)
+    return match.group(1).casefold() if match else "und"
+
+
+def prepare_crunchyroll_media_group(
+    meta: Metadata, group: CrunchyrollMediaGroup, settings: dict[str, Any]
+) -> CrunchyrollMediaGroup:
+    rename = bool(settings.get("crunchyroll_series_rename_enabled", True))
+    organize = bool(settings.get("crunchyroll_series_organize_enabled", True))
+    if not (rename or organize):
+        return group
+    season_folder = f"S{group.season:02d}"
+    if organize and re.fullmatch(r"S\d{1,2}", group.folder.name, re.IGNORECASE):
+        destination = group.folder.parent / season_folder
+    elif organize:
+        destination = group.folder / season_folder
+    else:
+        destination = group.folder
+    base = crunchyroll_target_base(meta, group) if rename else group.stem
+    targets: list[tuple[Path, Path]] = []
+    used: set[Path] = set()
+    subtitle_extensions = {".srt", ".vtt", ".ass", ".ssa", ".sub"}
+    for source in group.files:
+        if source.suffix.casefold() in subtitle_extensions and rename:
+            language = crunchyroll_subtitle_language(source, group.stem)
+            target = destination / f"{base}.{language}{source.suffix}"
+        else:
+            target = destination / f"{base}{source.suffix}"
+        if target in used or (target.exists() and target not in group.files):
+            raise FileExistsError(f"Crunchyroll rename target already exists: {target}")
+        used.add(target)
+        targets.append((source, target))
+    destination.mkdir(parents=True, exist_ok=True)
+    temporary: list[tuple[Path, Path]] = []
+    for index, (source, target) in enumerate(targets, start=1):
+        if source == target:
+            temporary.append((source, target))
+            continue
+        temp = source.with_name(f".crunchyroll-rename-{index}-{source.name}")
+        source.rename(temp)
+        temporary.append((temp, target))
+    for temporary_path, target in temporary:
+        if temporary_path != target:
+            temporary_path.rename(target)
+    final_files = [target for _source, target in targets]
+    video = next((path for path in final_files if path.suffix.casefold() in VIDEO_EXTENSIONS), None)
+    return CrunchyrollMediaGroup(
+        folder=destination,
+        stem=video.stem if video else base,
+        season=group.season,
+        episode=group.episode,
+        files=final_files,
+    )
+
+
+def crunchyroll_art_target(folder: Path, artwork_type: str, url: str) -> Path:
+    extension = image_extension_from_url(url) or (".png" if artwork_type == "logo" else ".jpg")
+    return folder / f"{artwork_type}{extension}"
+
+
+def save_crunchyroll_show_art(meta: Metadata, folder: Path) -> list[Path]:
+    saved: list[Path] = []
+    for artwork_type, url in (
+        ("poster", meta.poster_url),
+        ("backdrop", meta.fanart_url),
+        ("logo", meta.logo_url),
+    ):
+        if not clean_text(url):
+            continue
+        target = crunchyroll_art_target(folder, artwork_type, url)
+        if target.exists():
+            continue
+        path = download_binary(url, target)
+        if path:
+            saved.append(path)
+    return saved
+
+
+def save_crunchyroll_series_metadata(
+    meta: Metadata,
+    settings: dict[str, Any],
+    explicit_folder: str = "",
+    skip_existing: bool = False,
+) -> list[Path] | None:
+    if not crunchyroll_series_enabled(meta, settings, explicit_folder=explicit_folder):
+        return None
+    matches = crunchyroll_media_groups(meta, settings, explicit_folder=explicit_folder)
+    if not matches:
+        return None
+    saved: list[Path] = []
+    artwork_saved_for: set[Path] = set()
+    for group, record in matches:
+        episode_id = clean_text(record.get("id"))
+        if (
+            meta.media_kind.casefold() == "episode"
+            and meta.season_number == str(group.season)
+            and meta.episode_number == str(group.episode)
+        ):
+            episode_meta = meta
+        elif episode_id:
+            episode_url = clean_text(record.get("url")) or crunchyroll.canonical_episode_url(episode_id, "")
+            episode_meta = metadata_from_provider_dict(
+                crunchyroll.extract_episode_metadata(episode_id, episode_url, timeout=HTTP_TIMEOUT_SECONDS),
+                detail_link=episode_url,
+            )
+        else:
+            continue
+        episode_meta.media_kind = "episode"
+        episode_meta.show_title = meta.show_title or meta.title
+        episode_meta.season_number = str(group.season)
+        episode_meta.episode_number = str(group.episode)
+        prepared = prepare_crunchyroll_media_group(episode_meta, group, settings)
+        video = next((path for path in prepared.files if path.suffix.casefold() in VIDEO_EXTENSIONS), None)
+        if not video:
+            continue
+        nfo = video.with_suffix(".nfo")
+        if not (skip_existing and nfo.exists()):
+            nfo.write_text(build_nfo(episode_meta), encoding="utf-8")
+            saved.append(nfo)
+        thumb_extension = image_extension_from_url(episode_meta.thumb_url) or ".jpg"
+        thumb = video.with_name(f"{video.stem}-thumb{thumb_extension}")
+        if episode_meta.thumb_url and not thumb.exists():
+            downloaded = download_binary(episode_meta.thumb_url, thumb)
+            if downloaded:
+                saved.append(downloaded)
+        show_folder = prepared.folder.parent if re.fullmatch(r"S\d{2}", prepared.folder.name, re.IGNORECASE) else prepared.folder
+        if show_folder not in artwork_saved_for:
+            saved.extend(save_crunchyroll_show_art(episode_meta, show_folder))
+            artwork_saved_for.add(show_folder)
+    print(f"Crunchyroll series mode found {len(matches)} local episode(s) and saved {len(saved)} item(s).")
+    return saved
+
+
 def paramountplus_series_enabled(meta: Metadata, settings: dict[str, Any]) -> bool:
     return (
         meta.source_site == paramountplus.NAME
@@ -1123,9 +1374,21 @@ def save_paramountplus_series_metadata(
 
 
 def save_provider_series_metadata(
-    meta: Metadata, original_url: str, settings: dict[str, Any], skip_existing: bool = False
+    meta: Metadata,
+    original_url: str,
+    settings: dict[str, Any],
+    skip_existing: bool = False,
+    explicit_folder: str = "",
 ) -> list[Path] | None:
     saved = save_bbc_series_metadata(meta, original_url, settings, skip_existing=skip_existing)
+    if saved is not None:
+        return saved
+    saved = save_crunchyroll_series_metadata(
+        meta,
+        settings,
+        explicit_folder=explicit_folder,
+        skip_existing=skip_existing,
+    )
     if saved is not None:
         return saved
     return save_paramountplus_series_metadata(meta, settings, skip_existing=skip_existing)
@@ -1140,6 +1403,21 @@ def output_plan(meta: Metadata, settings: dict[str, Any], explicit_folder: str =
     if is_paramountplus_movie(meta):
         base = paramountplus_movie_name(meta)
         return settings_output_dir(settings) / paramountplus.NAME / base, base
+    if meta.source_site == crunchyroll.NAME and meta.media_kind.casefold() == "series":
+        return settings_output_dir(settings) / safe_filename(meta.title), "tvshow"
+    if (
+        meta.source_site == crunchyroll.NAME
+        and meta.media_kind.casefold() == "episode"
+        and meta.season_number.isdigit()
+        and meta.episode_number.isdigit()
+    ):
+        base = crunchyroll_target_base(meta)
+        return (
+            settings_output_dir(settings)
+            / safe_filename(meta.show_title or meta.title)
+            / f"S{int(meta.season_number):02d}",
+            base,
+        )
     folder = settings_output_dir(settings) / default_folder_name(meta)
     return folder, safe_filename(meta.folder_name_override or meta.title)
 
@@ -1169,23 +1447,42 @@ def save_metadata_bundle_to_location(
     nfo = nfo_path(folder, base_name)
     nfo.write_text(build_nfo(meta), encoding="utf-8")
     saved.append(nfo)
+    thumb_extension = image_extension_from_url(meta.thumb_url) or ".jpg"
+    thumb_name = (
+        f"thumb{thumb_extension}"
+        if meta.media_kind.casefold() == "series" and base_name == "tvshow"
+        else f"{base_name}-thumb{thumb_extension}"
+    )
+    thumb = download_binary(meta.thumb_url, folder / thumb_name)
+    if thumb:
+        saved.append(thumb)
     if not include_artwork:
         return saved
+    if meta.source_site == crunchyroll.NAME:
+        show_folder = folder
+        if meta.media_kind.casefold() == "episode" and re.fullmatch(r"S\d{2}", folder.name, re.IGNORECASE):
+            show_folder = folder.parent
+        saved.extend(save_crunchyroll_show_art(meta, show_folder))
+        return saved
     artwork_base = safe_filename(artwork_base_name) if artwork_base_name else base_name
+    is_tvshow_bundle = meta.media_kind.casefold() == "series" and base_name == "tvshow" and not artwork_base_name
 
-    poster = download_binary(meta.poster_url, folder / f"{artwork_base}-poster.jpg")
+    poster_target = folder / ("poster.jpg" if is_tvshow_bundle else f"{artwork_base}-poster.jpg")
+    poster = download_binary(meta.poster_url, poster_target)
     if poster:
         saved.append(poster)
-    fanart = download_binary(meta.fanart_url, folder / f"{artwork_base}-fanart.jpg")
+    fanart_target = folder / ("fanart.jpg" if is_tvshow_bundle else f"{artwork_base}-fanart.jpg")
+    fanart = download_binary(meta.fanart_url, fanart_target)
     if fanart:
         saved.append(fanart)
         for suffix in ("-banner.jpg", "-landscape.jpg"):
-            duplicate = folder / f"{artwork_base}{suffix}"
+            duplicate = folder / (suffix.removeprefix("-") if is_tvshow_bundle else f"{artwork_base}{suffix}")
             if not duplicate.exists():
                 shutil.copy2(fanart, duplicate)
             saved.append(duplicate)
     logo_extension = image_extension_from_url(meta.logo_url) or ".png"
-    logo = download_binary(meta.logo_url, folder / f"{artwork_base}-logo{logo_extension}")
+    logo_target = folder / (f"logo{logo_extension}" if is_tvshow_bundle else f"{artwork_base}-logo{logo_extension}")
+    logo = download_binary(meta.logo_url, logo_target)
     if logo:
         saved.append(logo)
 
@@ -1202,7 +1499,7 @@ def save_metadata_bundle_to_location(
             if path:
                 saved.append(path)
 
-    if meta.series_episodes and meta.source_site != paramountplus.NAME:
+    if meta.series_episodes and meta.source_site not in {paramountplus.NAME, crunchyroll.NAME}:
         episode_art_dir = folder / "Episode Artwork"
         for record in meta.series_episodes:
             image_url = clean_text(record.get("image"))
@@ -1333,7 +1630,8 @@ def fetch_bytes(url: str) -> bytes | None:
 
 def build_nfo(meta: Metadata) -> str:
     is_episode = meta.media_kind.casefold() == "episode"
-    root = ET.Element("episodedetails" if is_episode else "movie")
+    is_series = meta.media_kind.casefold() == "series"
+    root = ET.Element("episodedetails" if is_episode else "tvshow" if is_series else "movie")
     add_xml(root, "title", meta.episode_title if is_episode else meta.title)
     if is_episode:
         add_xml(root, "showtitle", meta.show_title or meta.title)
@@ -1509,7 +1807,13 @@ def run_handoff(args: argparse.Namespace, settings: dict[str, Any]) -> int:
     try:
         with AnimatedStatus("Creating your .nfo file and grabbing your trailer/images"):
             meta = scrape_url(detail_link)
-            saved = save_provider_series_metadata(meta, detail_link, settings, skip_existing=bool(args.skip_existing))
+            saved = save_provider_series_metadata(
+                meta,
+                detail_link,
+                settings,
+                skip_existing=bool(args.skip_existing),
+                explicit_folder=clean_text(args.media_folder),
+            )
             if saved is None:
                 saved = save_metadata_bundle(
                     meta,

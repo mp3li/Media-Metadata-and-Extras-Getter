@@ -1,0 +1,285 @@
+from __future__ import annotations
+
+import importlib.util
+import sys
+import tempfile
+import unittest
+import xml.etree.ElementTree as ET
+from pathlib import Path
+from unittest.mock import patch
+
+
+ROOT = Path(__file__).resolve().parents[1]
+
+
+def load_module(name: str, path: Path):
+    spec = importlib.util.spec_from_file_location(name, path)
+    if not spec or not spec.loader:
+        raise RuntimeError(f"Unable to load {path}")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+crunchyroll = load_module("test_crunchyroll_provider", ROOT / "Provider Scripts" / "crunchyroll.py")
+base = load_module("test_crunchyroll_base", ROOT / "Base Script" / "media_metadata_and_extras_getter_base.py")
+
+
+SERIES_ID = "GW4HM7WQ5"
+EPISODE_ID = "GE00362087ENUS"
+SHOW = "May I Ask for One Final Thing?"
+EPISODE_TITLE = "May I Kindly Beat the Tar Out of Those Evil Nobles (Pigs)?"
+
+
+RATING = {
+    "average": "4.8",
+    "total": 52354,
+    "5s": {"displayed": "44.6", "unit": "K", "percentage": 86},
+    "4s": {"displayed": "4.7", "unit": "K", "percentage": 10},
+    "3s": {"displayed": "1.7", "unit": "K", "percentage": 4},
+    "2s": {"displayed": "556", "percentage": 2},
+    "1s": {"displayed": "676", "percentage": 2},
+}
+
+
+def series_object():
+    return {
+        "id": SERIES_ID,
+        "title": SHOW,
+        "description": "Scarlet has put up with her fiancé’s bullying long enough.",
+        "slug_title": "may-i-ask-for-one-final-thing",
+        "rating": RATING,
+        "images": {
+            "poster_tall": [[
+                {"source": "https://img.example/poster-small.png", "width": 260, "height": 390},
+                {"source": "https://img.example/poster.png", "width": 1560, "height": 2340},
+            ]],
+            "poster_wide": [[
+                {"source": "https://img.example/backdrop.png", "width": 1920, "height": 1080}
+            ]],
+        },
+        "series_metadata": {
+            "tenant_categories": ["Action", "Comedy", "Fantasy"],
+            "content_descriptors": ["Violence", "Profanity"],
+            "maturity_ratings": ["TV-14"],
+        },
+    }
+
+
+def series_detail():
+    return {
+        "id": SERIES_ID,
+        "series_launch_year": 2025,
+        "episode_count": 13,
+        "season_count": 1,
+        "season_tags": ["fall-2025"],
+        "content_provider": "LIDEN FILMS",
+        "is_subbed": True,
+        "is_dubbed": True,
+        "audio_locales": ["ja-JP", "en-US"],
+        "subtitle_locales": ["en-US", "de-DE"],
+        "content_descriptors": ["Violence", "Profanity"],
+        "maturity_ratings": ["TV-14"],
+    }
+
+
+def episode_object():
+    return {
+        "id": EPISODE_ID,
+        "title": EPISODE_TITLE,
+        "description": "When Scarlet's fiancé dumps her at a ball, she requests satisfaction.",
+        "slug_title": "may-i-kindly-beat-the-tar-out-of-those-evil-nobles-pigs",
+        "rating": {
+            "up": {"displayed": "15.2", "unit": "K"},
+            "down": {"displayed": "96"},
+            "total": 15334,
+        },
+        "images": {"thumbnail": [[
+            {"source": "https://img.example/thumb-320.png", "width": 320, "height": 180},
+            {"source": "https://img.example/thumb-640.png", "width": 640, "height": 360},
+            {"source": "https://img.example/thumb-1920.png", "width": 1920, "height": 1080},
+        ]]},
+    }
+
+
+def episode_detail():
+    return {
+        "id": EPISODE_ID,
+        "series_id": SERIES_ID,
+        "series_title": SHOW,
+        "season_number": 1,
+        "episode_number": 1,
+        "duration_ms": 1420046,
+        "episode_air_date": "2025-10-03T17:00:00Z",
+        "upload_date": "2025-10-03T18:30:00Z",
+        "maturity_ratings": ["TV-14"],
+        "content_descriptors": ["Violence", "Profanity"],
+        "is_subbed": True,
+        "is_dubbed": True,
+        "versions": [
+            {"guid": "GE00362087JAJP", "audio_locale": "ja-JP", "original": True},
+            {"guid": EPISODE_ID, "audio_locale": "en-US"},
+        ],
+        "subtitle_locales": ["en-US", "de-DE"],
+        "next_episode_id": "GE00362089ENUS",
+        "next_episode_title": "May I Offer You the Taste of My Fist?",
+    }
+
+
+def api_fixture(path: str, timeout: int = 25):
+    if path == f"objects/{SERIES_ID}":
+        return {"data": [series_object()]}
+    if path == f"series/{SERIES_ID}":
+        return {"data": [series_detail()]}
+    if path == f"objects/{EPISODE_ID}":
+        return {"data": [episode_object()]}
+    if path == f"episodes/{EPISODE_ID}":
+        return {"data": [episode_detail()]}
+    if path == f"series/{SERIES_ID}/seasons":
+        return {"data": [{"id": "SEASON1", "season_number": 1}]}
+    if path == "seasons/SEASON1/episodes":
+        first = dict(episode_detail())
+        first.update(episode_object())
+        second = dict(first)
+        second.update({"id": "EPISODE2", "episode_number": 2, "title": "Episode Two"})
+        return {"data": [first, second]}
+    raise AssertionError(f"Unexpected API path: {path}")
+
+
+class CrunchyrollProviderTests(unittest.TestCase):
+    def extract_series(self):
+        with patch.object(crunchyroll, "api_get", side_effect=api_fixture):
+            return crunchyroll.extract_series_metadata(SERIES_ID)
+
+    def extract_episode(self):
+        with patch.object(crunchyroll, "api_get", side_effect=api_fixture):
+            return crunchyroll.extract_episode_metadata(EPISODE_ID)
+
+    def test_series_selected_metadata_and_artwork(self):
+        item = self.extract_series()
+        self.assertEqual(item["poster_url"], "https://img.example/poster.png")
+        self.assertEqual(item["fanart_url"], "https://img.example/backdrop.png")
+        self.assertEqual(
+            item["logo_url"],
+            "https://imgsrv.crunchyroll.com/cdn-cgi/image/fit=contain,format=png,quality=100,width=1200/"
+            "keyart/GW4HM7WQ5-title_logo-en-us",
+        )
+        self.assertEqual(item["year"], "2025")
+        self.assertEqual(item["studios"], ["LIDEN FILMS"])
+        self.assertEqual(item["extra_fields"]["Episode count"], ["13"])
+        self.assertEqual(item["extra_fields"]["Season count"], ["1"])
+        self.assertEqual(item["extra_fields"]["Season tag"], ["fall-2025"])
+        self.assertNotIn("Availability", item["extra_fields"])
+        self.assertEqual(len(item["series_episodes"]), 2)
+
+    def test_episode_rating_tags_are_adjacent_and_exact(self):
+        item = self.extract_episode()
+        first = item["tags"].index("crunchyrollratings: 15.2k upvotes / 96 downvotes")
+        self.assertEqual(
+            item["tags"][first:first + 7],
+            [
+                "crunchyrollratings: 15.2k upvotes / 96 downvotes",
+                "crunchyrollrating: 4.8 / 5 from 52,354 ratings",
+                "crunchyrollrating5stars: 44.6k / 86%",
+                "crunchyrollrating4stars: 4.7k / 10%",
+                "crunchyrollrating3stars: 1.7k / 4%",
+                "crunchyrollrating2stars: 556 / 2%",
+                "crunchyrollrating1star: 676 / 2%",
+            ],
+        )
+        self.assertEqual(item["thumb_url"], "https://img.example/thumb-640.png")
+        self.assertEqual(item["language"], "Japanese")
+        self.assertEqual(item["extra_fields"]["Exact runtime"], ["23:40.046 | 1,420,046 ms"])
+        self.assertEqual(item["extra_fields"]["Air date"], ["2025-10-03T17:00:00Z"])
+        self.assertEqual(item["extra_fields"]["Upload date"], ["2025-10-03T18:30:00Z"])
+        self.assertNotIn("Premium Only", item["extra_fields"])
+
+    def test_series_nfo_uses_tvshow_root(self):
+        meta = base.metadata_from_provider_dict(self.extract_series())
+        root = ET.fromstring(base.build_nfo(meta))
+        self.assertEqual(root.tag, "tvshow")
+        self.assertEqual(root.findtext("uniqueid"), SERIES_ID)
+
+    def test_local_only_episode_is_renamed_organized_and_saved(self):
+        series_meta = base.metadata_from_provider_dict(self.extract_series())
+        episode_item = self.extract_episode()
+        with tempfile.TemporaryDirectory() as temp:
+            show_folder = Path(temp) / SHOW
+            show_folder.mkdir()
+            (show_folder / "E1.mp4").write_bytes(b"video")
+            (show_folder / "E1.srt").write_text("subtitle", encoding="utf-8")
+            settings = {
+                "media_folders": [str(show_folder)],
+                "crunchyroll_series_metadata_enabled": True,
+                "crunchyroll_series_rename_enabled": True,
+                "crunchyroll_series_organize_enabled": True,
+            }
+
+            def fake_download(url: str, target: Path):
+                if not url:
+                    return None
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_bytes(b"image")
+                return target
+
+            with (
+                patch.object(base.crunchyroll, "extract_episode_metadata", return_value=episode_item) as extract,
+                patch.object(base, "download_binary", side_effect=fake_download),
+            ):
+                saved = base.save_crunchyroll_series_metadata(series_meta, settings)
+
+            target_base = f"S01E01 {SHOW[:-1]} - {EPISODE_TITLE[:-1]}"
+            season_folder = show_folder / "S01"
+            video = season_folder / f"{target_base}.mp4"
+            nfo = season_folder / f"{target_base}.nfo"
+            self.assertTrue(video.exists())
+            self.assertTrue((season_folder / f"{target_base}.und.srt").exists())
+            self.assertTrue(nfo.exists())
+            self.assertTrue((season_folder / f"{target_base}-thumb.png").exists())
+            self.assertTrue((show_folder / "poster.png").exists())
+            self.assertTrue((show_folder / "backdrop.png").exists())
+            self.assertTrue((show_folder / "logo.png").exists())
+            self.assertEqual(extract.call_count, 1)
+            self.assertFalse(any("EPISODE2" in str(path) for path in saved or []))
+
+            root = ET.fromstring(nfo.read_text(encoding="utf-8"))
+            tags = [node.text for node in root.findall("tag")]
+            vote_index = tags.index("crunchyrollratings: 15.2k upvotes / 96 downvotes")
+            self.assertEqual(tags[vote_index + 1], "crunchyrollrating: 4.8 / 5 from 52,354 ratings")
+            self.assertEqual(root.findtext("language"), "Japanese")
+
+    def test_episode_position_forms(self):
+        for text in ("S01E01", "S1 E1", "Season 1 Episode 1", "Series 1 Episode 1", "1x01", "01-01", "E1"):
+            with self.subTest(text=text):
+                self.assertEqual(base.crunchyroll_episode_position(text), (1, 1))
+
+    def test_existing_rename_destination_is_never_overwritten(self):
+        episode_meta = base.metadata_from_provider_dict(self.extract_episode())
+        with tempfile.TemporaryDirectory() as temp:
+            folder = Path(temp)
+            source = folder / "E1.mp4"
+            source.write_bytes(b"source")
+            season_folder = folder / "S01"
+            season_folder.mkdir()
+            target = season_folder / f"{base.crunchyroll_target_base(episode_meta)}.mp4"
+            target.write_bytes(b"existing")
+            group = base.CrunchyrollMediaGroup(
+                folder=folder,
+                stem="E1",
+                season=1,
+                episode=1,
+                files=[source],
+            )
+            settings = {
+                "crunchyroll_series_rename_enabled": True,
+                "crunchyroll_series_organize_enabled": True,
+            }
+            with self.assertRaises(FileExistsError):
+                base.prepare_crunchyroll_media_group(episode_meta, group, settings)
+            self.assertEqual(source.read_bytes(), b"source")
+            self.assertEqual(target.read_bytes(), b"existing")
+
+
+if __name__ == "__main__":
+    unittest.main()
