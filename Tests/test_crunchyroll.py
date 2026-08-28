@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib.util
+import os
 import sys
 import tempfile
 import unittest
@@ -391,10 +392,42 @@ class CrunchyrollProviderTests(unittest.TestCase):
             second_prepared = base.prepare_crunchyroll_media_group(second_meta, second_group, settings)
 
             show_folder = download_folder / base.safe_filename(SHOW)
-            self.assertEqual(first_prepared.folder, show_folder / "S01")
-            self.assertEqual(second_prepared.folder, show_folder / "S01")
+            self.assertEqual(first_prepared.folder, (show_folder / "S01").resolve())
+            self.assertEqual(second_prepared.folder, (show_folder / "S01").resolve())
             self.assertTrue((show_folder / "S01" / f"{base.crunchyroll_target_base(episode_meta, first_group)}.mkv").exists())
             self.assertTrue((show_folder / "S01" / f"{base.crunchyroll_target_base(second_meta, second_group)}.mkv").exists())
+            self.assertFalse((show_folder / base.safe_filename(SHOW)).exists())
+
+    def test_relative_media_path_recognizes_current_series_folder(self):
+        episode_meta = base.metadata_from_provider_dict(self.extract_episode())
+        with tempfile.TemporaryDirectory() as temp:
+            show_folder = Path(temp) / base.safe_filename(SHOW)
+            show_folder.mkdir()
+            video = show_folder / f"crunchyroll-{EPISODE_ID}.mkv"
+            video.write_bytes(b"video")
+            previous_directory = Path.cwd()
+            try:
+                os.chdir(show_folder)
+                relative_video = Path(f"./crunchyroll-{EPISODE_ID}.mkv")
+                group = base.CrunchyrollMediaGroup(
+                    folder=relative_video.parent,
+                    stem=relative_video.stem,
+                    season=1,
+                    episode=1,
+                    files=[relative_video],
+                )
+                prepared = base.prepare_crunchyroll_media_group(
+                    episode_meta,
+                    group,
+                    {
+                        "crunchyroll_series_rename_enabled": True,
+                        "crunchyroll_series_organize_enabled": True,
+                    },
+                )
+            finally:
+                os.chdir(previous_directory)
+
+            self.assertEqual(prepared.folder, (show_folder / "S01").resolve())
             self.assertFalse((show_folder / base.safe_filename(SHOW)).exists())
 
     def test_english_cc_is_kept_and_forced_sign_track_is_discarded(self):
@@ -436,7 +469,7 @@ class CrunchyrollProviderTests(unittest.TestCase):
             )
 
             target_base = base.crunchyroll_target_base(episode_meta, group)
-            self.assertEqual(prepared.folder, folder / base.safe_filename(SHOW) / "S01")
+            self.assertEqual(prepared.folder, (folder / base.safe_filename(SHOW) / "S01").resolve())
             self.assertTrue((prepared.folder / f"{target_base}.en.cc.srt").exists())
             self.assertFalse((prepared.folder / f"{target_base}.en.forced.srt").exists())
             self.assertFalse(forced.exists())

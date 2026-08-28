@@ -448,7 +448,7 @@ Chosen Download Location/
       S01E01 May I Ask for One Final Thing - May I Kindly Beat the Tar Out of Those Evil Nobles (Pigs)-thumb.png
 ```
 
-Later episodes downloaded into the same parent location reuse that series folder and are routed into their corresponding season folders. A location already named for the series is recognized and is never nested as `Series Name/Series Name/`.
+Later episodes downloaded into the same parent location reuse that series folder and are routed into their corresponding season folders. A location already named for the series is recognized—even when the handoff supplies a relative path such as `./episode.mkv`—and is never nested as `Series Name/Series Name/`.
 
 The transparent title image is fetched from Crunchyroll's public key-art endpoint. `tvshow.nfo` contains the main series description and series-level fields, while each NFO inside a season folder contains that episode's description and fields. This hierarchy is created from either a series page or an individual watch page, so a saved episode is never left without its main series metadata.
 

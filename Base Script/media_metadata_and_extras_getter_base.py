@@ -1248,7 +1248,12 @@ def save_crunchyroll_show_art(meta: Metadata, folder: Path) -> list[Path]:
 
 
 def crunchyroll_show_folder(folder: Path, meta: Metadata) -> Path:
-    root = folder.parent if re.fullmatch(r"S\d{1,2}", folder.name, re.IGNORECASE) else folder
+    resolved_folder = folder.resolve()
+    root = (
+        resolved_folder.parent
+        if re.fullmatch(r"S\d{1,2}", resolved_folder.name, re.IGNORECASE)
+        else resolved_folder
+    )
     show_name = safe_filename(meta.show_title or meta.title)
     if normalize_match_key(root.name) == normalize_match_key(show_name):
         return root
