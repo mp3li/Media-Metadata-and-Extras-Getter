@@ -11,6 +11,8 @@ All notable project changes are documented here. Published entries are derived f
 - Ordered Jellyfin tags for episode upvotes/downvotes and the exact series average, rating total, and five-to-one-star distribution.
 - Crunchyroll audio, subtitle, sub/dub, advisory, studio, launch year, season tag/count, episode count, exact runtime, original audio, separate air/upload dates, and next-episode metadata.
 - Local-only Crunchyroll series matching with safe video/subtitle renaming and season-folder organization.
+- End-of-workflow Crunchyroll series trailers in Jellyfin's native `trailers/trailer.mp4` location, preferring provider-supplied media and otherwise requiring an exact verified official Crunchyroll YouTube match.
+- The exact `Crunchyroll Provider` tag on every Crunchyroll series and episode NFO.
 - Paramount+ provider for public show, season, and episode pages.
 - Paramount+ movie and public-clip page support, including cast, movie runtime/rating, clip metadata, and explicit clear-DASH safeguards.
 - Full public season-guide extraction, including episode titles, placements, synopses, dates, IDs, public episode URLs, and exposed durations.
@@ -20,6 +22,8 @@ All notable project changes are documented here. Published entries are derived f
 - Paramount+ source and provider tags in generated NFO metadata.
 
 ### Changed
+
+- Crunchyroll series folders now include provider-derived run years: `Series Title (Year)` for completed single-year runs, `Series Title (Start Year-End Year)` for completed multi-year runs, and `Series Title (Start Year-)` while currently airing, with legacy or stale year-qualified paths migrated atomically rather than nested.
 
 - Individual Crunchyroll watch-page handoffs now ensure a show-level `tvshow.nfo`, poster, backdrop, and logo beside the season folders before saving episode metadata; existing show metadata and artwork are preserved.
 - Crunchyroll subtitle organization now identifies full accessibility tracks with Jellyfin's `cc` flag, discards proven same-language forced signs/title-card tracks, and preserves ambiguous distinct tracks without filename collisions.

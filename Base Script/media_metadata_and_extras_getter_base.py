@@ -9,6 +9,7 @@ import re
 import shutil
 import subprocess
 import sys
+import tempfile
 import textwrap
 import threading
 import urllib.parse
@@ -82,6 +83,9 @@ class Metadata:
     outline: str = ""
     tagline: str = ""
     year: str = ""
+    series_start_year: str = ""
+    series_end_year: str = ""
+    series_is_current: bool = False
     date: str = ""
     runtime_minutes: str = ""
     content_rating: str = ""
@@ -292,6 +296,9 @@ def metadata_from_provider_dict(item: dict[str, Any], detail_link: str = "") -> 
     meta.outline = clean_text(item.get("outline")) or meta.plot
     meta.tagline = clean_text(item.get("tagline"))
     meta.year = clean_text(item.get("year"))
+    meta.series_start_year = clean_text(item.get("series_start_year"))
+    meta.series_end_year = clean_text(item.get("series_end_year"))
+    meta.series_is_current = bool(item.get("series_is_current"))
     meta.date = clean_text(item.get("date"))
     meta.runtime_minutes = clean_text(item.get("runtime_minutes"))
     meta.content_rating = clean_text(item.get("content_rating"))
@@ -1154,6 +1161,8 @@ def prepare_crunchyroll_media_group(
     organize = bool(settings.get("crunchyroll_series_organize_enabled", True))
     if not (rename or organize):
         return group
+    if organize:
+        group = migrate_crunchyroll_series_folder(group, meta)
     season_folder = f"S{group.season:02d}"
     destination = (
         crunchyroll_show_folder(group.folder, meta) / season_folder
@@ -1224,6 +1233,33 @@ def prepare_crunchyroll_media_group(
     )
 
 
+def migrate_crunchyroll_series_folder(
+    group: CrunchyrollMediaGroup, meta: Metadata
+) -> CrunchyrollMediaGroup:
+    """Atomically rename a legacy or stale year-range series root before organizing an episode."""
+    folder = group.folder.resolve()
+    root = folder.parent if re.fullmatch(r"S\d{1,2}", folder.name, re.IGNORECASE) else folder
+    title = safe_filename(meta.show_title or meta.title)
+    root_title = re.sub(r" \(\d{4}(?:-(?:\d{4})?)?\)$", "", root.name)
+    if normalize_match_key(root_title) != normalize_match_key(title):
+        return group
+    desired = root.parent / crunchyroll_series_folder_name(meta)
+    if desired == root:
+        return group
+    if desired.exists():
+        raise FileExistsError(f"Crunchyroll series folder already exists: {desired}")
+    relative_folder = folder.relative_to(root)
+    relative_files = [path.resolve().relative_to(root) for path in group.files]
+    root.rename(desired)
+    return CrunchyrollMediaGroup(
+        folder=desired / relative_folder,
+        stem=group.stem,
+        season=group.season,
+        episode=group.episode,
+        files=[desired / path for path in relative_files],
+    )
+
+
 def crunchyroll_art_target(folder: Path, artwork_type: str, url: str) -> Path:
     extension = image_extension_from_url(url) or (".png" if artwork_type == "logo" else ".jpg")
     return folder / f"{artwork_type}{extension}"
@@ -1254,10 +1290,29 @@ def crunchyroll_show_folder(folder: Path, meta: Metadata) -> Path:
         if re.fullmatch(r"S\d{1,2}", resolved_folder.name, re.IGNORECASE)
         else resolved_folder
     )
-    show_name = safe_filename(meta.show_title or meta.title)
+    show_title = safe_filename(meta.show_title or meta.title)
+    show_name = crunchyroll_series_folder_name(meta)
     if normalize_match_key(root.name) == normalize_match_key(show_name):
         return root
+    legacy_name = re.sub(r" \(\d{4}(?:-(?:\d{4})?)?\)$", "", root.name)
+    if normalize_match_key(legacy_name) == normalize_match_key(show_title):
+        return root.parent / show_name
     return root / show_name
+
+
+def crunchyroll_series_folder_name(meta: Metadata) -> str:
+    title = safe_filename(meta.show_title or meta.title)
+    start = clean_text(meta.series_start_year)
+    end = clean_text(meta.series_end_year)
+    if not start.isdigit():
+        return title
+    if meta.series_is_current:
+        years = f"{start}-"
+    elif not end or end == start:
+        years = start
+    else:
+        years = f"{start}-{end}"
+    return safe_filename(f"{title} ({years})")
 
 
 def crunchyroll_series_id(meta: Metadata) -> str:
@@ -1292,6 +1347,101 @@ def ensure_crunchyroll_series_bundle(episode_meta: Metadata, show_folder: Path) 
     return save_metadata_bundle_to_location(series_meta, show_folder, "tvshow", skip_existing=True)
 
 
+def save_crunchyroll_series_trailer(meta: Metadata, show_folder: Path) -> list[Path]:
+    """Save one series trailer last, preferring any URL supplied directly by Crunchyroll."""
+    trailer_dir = show_folder / "trailers"
+    if trailer_dir.exists() and any(
+        path.is_file() and path.suffix.casefold() in VIDEO_EXTENSIONS
+        for path in trailer_dir.iterdir()
+    ):
+        return []
+    trailer_url = clean_text(meta.trailer_url)
+    youtube_fallback = False
+    if not trailer_url:
+        match = crunchyroll.find_official_youtube_trailer(meta.show_title or meta.title)
+        trailer_url = clean_text(match.get("url"))
+        youtube_fallback = bool(trailer_url)
+    if not trailer_url:
+        return []
+    trailer_dir.mkdir(parents=True, exist_ok=True)
+    target = trailer_dir / "trailer.mp4"
+    if youtube_fallback or is_youtube_url(trailer_url):
+        trailer = download_youtube_trailer(trailer_url, target)
+    else:
+        trailer = download_binary(trailer_url, target)
+    if trailer:
+        print(f"Crunchyroll series trailer saved to {trailer}")
+        return [trailer]
+    return []
+
+
+def is_youtube_url(url: str) -> bool:
+    host = urllib.parse.urlparse(clean_text(url)).hostname or ""
+    return host.casefold() in {"youtube.com", "www.youtube.com", "m.youtube.com", "youtu.be"}
+
+
+def download_youtube_trailer(url: str, target: Path) -> Path | None:
+    """Download a public YouTube trailer in a Jellyfin-friendly MP4 container."""
+    with tempfile.TemporaryDirectory(prefix=".trailer-download-", dir=target.parent) as temporary_directory:
+        temporary_template = Path(temporary_directory) / "trailer.%(ext)s"
+        command = [
+            "yt-dlp",
+            "--no-playlist",
+            "--no-overwrites",
+            "--no-warnings",
+            *youtube_js_runtime_args(),
+            "--extractor-args",
+            "youtube:player_client=web_embedded",
+            "--merge-output-format",
+            "mp4",
+            "--format",
+            "bv*[vcodec^=avc1][height<=1080]+ba[ext=m4a]/b[ext=mp4][height<=1080]/best[height<=1080]",
+            "--output",
+            str(temporary_template),
+            url,
+        ]
+        try:
+            result = subprocess.run(
+                command,
+                capture_output=True,
+                check=False,
+                text=True,
+                timeout=900,
+            )
+        except FileNotFoundError:
+            print("Crunchyroll trailer skipped: yt-dlp is not installed.")
+            return None
+        except subprocess.TimeoutExpired:
+            print("Crunchyroll trailer skipped: the YouTube download timed out.")
+            return None
+        candidates = sorted(
+            path
+            for path in Path(temporary_directory).iterdir()
+            if path.is_file() and path.suffix.casefold() in VIDEO_EXTENSIONS and path.stat().st_size
+        )
+        if result.returncode != 0:
+            detail = clean_text(result.stderr).splitlines()
+            suffix = f" {detail[-1]}" if detail else ""
+            print(f"Crunchyroll trailer skipped: yt-dlp failed.{suffix}")
+            return None
+        if len(candidates) != 1 or target.exists():
+            print("Crunchyroll trailer skipped: yt-dlp did not produce one unambiguous video file.")
+            return None
+        candidates[0].rename(target)
+    return target
+
+
+def youtube_js_runtime_args() -> list[str]:
+    """Enable an installed yt-dlp JavaScript runtime; Deno is enabled by default."""
+    if shutil.which("deno"):
+        return []
+    for executable, runtime_name in (("node", "node"), ("qjs", "quickjs"), ("bun", "bun")):
+        runtime_path = shutil.which(executable)
+        if runtime_path:
+            return ["--js-runtimes", f"{runtime_name}:{runtime_path}"]
+    return []
+
+
 def save_crunchyroll_series_metadata(
     meta: Metadata,
     settings: dict[str, Any],
@@ -1305,6 +1455,7 @@ def save_crunchyroll_series_metadata(
         return None
     saved: list[Path] = []
     artwork_saved_for: set[Path] = set()
+    trailer_meta_for: dict[Path, Metadata] = {}
     for group, record in matches:
         episode_id = clean_text(record.get("id"))
         if (
@@ -1325,11 +1476,12 @@ def save_crunchyroll_series_metadata(
         episode_meta.show_title = meta.show_title or meta.title
         episode_meta.season_number = str(group.season)
         episode_meta.episode_number = str(group.episode)
-        show_folder = crunchyroll_show_folder(group.folder, episode_meta)
+        prepared = prepare_crunchyroll_media_group(episode_meta, group, settings)
+        show_folder = crunchyroll_show_folder(prepared.folder, episode_meta)
         if show_folder not in artwork_saved_for:
             saved.extend(ensure_crunchyroll_series_bundle(episode_meta, show_folder))
             artwork_saved_for.add(show_folder)
-        prepared = prepare_crunchyroll_media_group(episode_meta, group, settings)
+        trailer_meta_for[show_folder] = episode_meta
         video = next((path for path in prepared.files if path.suffix.casefold() in VIDEO_EXTENSIONS), None)
         if not video:
             continue
@@ -1343,6 +1495,8 @@ def save_crunchyroll_series_metadata(
             downloaded = download_binary(episode_meta.thumb_url, thumb)
             if downloaded:
                 saved.append(downloaded)
+    for show_folder, episode_meta in trailer_meta_for.items():
+        saved.extend(save_crunchyroll_series_trailer(episode_meta, show_folder))
     print(f"Crunchyroll series mode found {len(matches)} local episode(s) and saved {len(saved)} item(s).")
     return saved
 
@@ -1507,7 +1661,7 @@ def output_plan(meta: Metadata, settings: dict[str, Any], explicit_folder: str =
         base = paramountplus_movie_name(meta)
         return settings_output_dir(settings) / paramountplus.NAME / base, base
     if meta.source_site == crunchyroll.NAME and meta.media_kind.casefold() == "series":
-        return settings_output_dir(settings) / safe_filename(meta.title), "tvshow"
+        return settings_output_dir(settings) / crunchyroll_series_folder_name(meta), "tvshow"
     if (
         meta.source_site == crunchyroll.NAME
         and meta.media_kind.casefold() == "episode"
@@ -1517,7 +1671,7 @@ def output_plan(meta: Metadata, settings: dict[str, Any], explicit_folder: str =
         base = crunchyroll_target_base(meta)
         return (
             settings_output_dir(settings)
-            / safe_filename(meta.show_title or meta.title)
+            / crunchyroll_series_folder_name(meta)
             / f"S{int(meta.season_number):02d}",
             base,
         )
@@ -1532,9 +1686,14 @@ def nfo_path(folder: Path, base_name: str) -> Path:
 def save_metadata_bundle(meta: Metadata, settings: dict[str, Any], explicit_folder: str = "", skip_existing: bool = False) -> list[Path]:
     folder, base_name = output_plan(meta, settings, explicit_folder=explicit_folder)
     saved: list[Path] = []
+    crunchyroll_series_folder: Path | None = None
     if meta.source_site == crunchyroll.NAME and meta.media_kind.casefold() == "episode":
-        saved.extend(ensure_crunchyroll_series_bundle(meta, crunchyroll_show_folder(folder, meta)))
+        crunchyroll_series_folder = crunchyroll_show_folder(folder, meta)
+        saved.extend(ensure_crunchyroll_series_bundle(meta, crunchyroll_series_folder))
     saved.extend(save_metadata_bundle_to_location(meta, folder, base_name, skip_existing=skip_existing))
+    if meta.source_site == crunchyroll.NAME:
+        crunchyroll_series_folder = crunchyroll_series_folder or crunchyroll_show_folder(folder, meta)
+        saved.extend(save_crunchyroll_series_trailer(meta, crunchyroll_series_folder))
     return saved
 
 

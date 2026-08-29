@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import importlib.util
+import json
 import os
 import sys
 import tempfile
 import unittest
 import xml.etree.ElementTree as ET
+from datetime import date
 from pathlib import Path
 from unittest.mock import patch
 
@@ -167,15 +169,56 @@ class CrunchyrollProviderTests(unittest.TestCase):
             "keyart/GW4HM7WQ5-title_logo-en-us",
         )
         self.assertEqual(item["year"], "2025")
+        self.assertEqual(item["series_start_year"], "2025")
+        self.assertEqual(item["series_end_year"], "2025")
+        self.assertFalse(item["series_is_current"])
         self.assertEqual(item["studios"], ["LIDEN FILMS"])
         self.assertEqual(item["extra_fields"]["Episode count"], ["13"])
         self.assertEqual(item["extra_fields"]["Season count"], ["1"])
         self.assertEqual(item["extra_fields"]["Season tag"], ["fall-2025"])
         self.assertNotIn("Availability", item["extra_fields"])
         self.assertEqual(len(item["series_episodes"]), 2)
+        self.assertEqual(item["trailer_url"], "")
+        self.assertIn("Crunchyroll Provider", item["tags"])
+
+    def test_official_youtube_trailer_requires_exact_title_and_channel(self):
+        results = {
+            "entries": [
+                {
+                    "id": "fan-upload",
+                    "title": f"{SHOW} | Official Trailer | Crunchyroll",
+                    "uploader_id": "@fan-channel",
+                    "url": "https://www.youtube.com/watch?v=fan-upload",
+                },
+                {
+                    "id": "wrong-show",
+                    "title": "Another Show | Official Trailer | Crunchyroll",
+                    "uploader_id": "@crunchyroll",
+                    "url": "https://www.youtube.com/watch?v=wrong-show",
+                },
+                {
+                    "id": "official-trailer",
+                    "title": f"{SHOW} - Official Trailer",
+                    "uploader_id": "@crunchyrolldubs",
+                    "channel": "Crunchyroll Dubs",
+                    "url": "https://www.youtube.com/watch?v=official-trailer",
+                },
+            ]
+        }
+        completed = crunchyroll.subprocess.CompletedProcess(
+            args=["yt-dlp"],
+            returncode=0,
+            stdout=json.dumps(results),
+            stderr="",
+        )
+        with patch.object(crunchyroll.subprocess, "run", return_value=completed):
+            match = crunchyroll.find_official_youtube_trailer(SHOW)
+        self.assertEqual(match["id"], "official-trailer")
+        self.assertEqual(match["channel"], "Crunchyroll Dubs")
 
     def test_episode_rating_tags_are_adjacent_and_exact(self):
         item = self.extract_episode()
+        self.assertIn("Crunchyroll Provider", item["tags"])
         first = item["tags"].index("crunchyrollratings: 15.2k upvotes / 96 downvotes")
         self.assertEqual(
             item["tags"][first:first + 7],
@@ -211,12 +254,12 @@ class CrunchyrollProviderTests(unittest.TestCase):
         series_meta = base.metadata_from_provider_dict(self.extract_series())
         episode_item = self.extract_episode()
         with tempfile.TemporaryDirectory() as temp:
-            show_folder = Path(temp) / SHOW
-            show_folder.mkdir()
-            (show_folder / "E1.mp4").write_bytes(b"video")
-            (show_folder / "E1.srt").write_text("subtitle", encoding="utf-8")
+            legacy_folder = Path(temp) / SHOW
+            legacy_folder.mkdir()
+            (legacy_folder / "E1.mp4").write_bytes(b"video")
+            (legacy_folder / "E1.srt").write_text("subtitle", encoding="utf-8")
             settings = {
-                "media_folders": [str(show_folder)],
+                "media_folders": [str(legacy_folder)],
                 "crunchyroll_series_metadata_enabled": True,
                 "crunchyroll_series_rename_enabled": True,
                 "crunchyroll_series_organize_enabled": True,
@@ -231,11 +274,13 @@ class CrunchyrollProviderTests(unittest.TestCase):
 
             with (
                 patch.object(base.crunchyroll, "extract_episode_metadata", return_value=episode_item) as extract,
+                patch.object(base.crunchyroll, "find_official_youtube_trailer", return_value={}),
                 patch.object(base, "download_binary", side_effect=fake_download),
             ):
                 saved = base.save_crunchyroll_series_metadata(series_meta, settings)
 
             target_base = f"S01E01 {SHOW[:-1]} - {EPISODE_TITLE[:-1]}"
+            show_folder = Path(temp) / base.crunchyroll_series_folder_name(series_meta)
             season_folder = show_folder / "S01"
             video = season_folder / f"{target_base}.mp4"
             nfo = season_folder / f"{target_base}.nfo"
@@ -279,6 +324,7 @@ class CrunchyrollProviderTests(unittest.TestCase):
 
             with (
                 patch.object(base.crunchyroll, "extract_series_metadata") as extract_series,
+                patch.object(base.crunchyroll, "find_official_youtube_trailer", return_value={}),
                 patch.object(base, "download_binary", side_effect=fake_download),
             ):
                 base.save_metadata_bundle_to_location(
@@ -313,7 +359,7 @@ class CrunchyrollProviderTests(unittest.TestCase):
                 base.save_metadata_bundle(episode_meta, settings)
 
             extract_series.assert_not_called()
-            show_folder = Path(temp) / base.safe_filename(SHOW)
+            show_folder = Path(temp) / base.crunchyroll_series_folder_name(episode_meta)
             self.assertTrue((show_folder / "tvshow.nfo").exists())
             self.assertTrue((show_folder / "poster.png").exists())
             episode_nfo = show_folder / "S01" / f"{base.crunchyroll_target_base(episode_meta)}.nfo"
@@ -327,6 +373,75 @@ class CrunchyrollProviderTests(unittest.TestCase):
                 "When Scarlet's fiancé dumps her at a ball, she requests satisfaction.",
             )
 
+    def test_crunchyroll_trailer_uses_jellyfin_folder_and_provider_url_first(self):
+        episode_meta = base.metadata_from_provider_dict(self.extract_episode())
+        episode_meta.trailer_url = "https://cdn.crunchyroll.example/trailer.mp4"
+        with tempfile.TemporaryDirectory() as temp:
+            show_folder = Path(temp) / base.safe_filename(SHOW)
+
+            def fake_download(url: str, target: Path):
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_bytes(b"provider trailer")
+                return target
+
+            with (
+                patch.object(base.crunchyroll, "find_official_youtube_trailer") as youtube_search,
+                patch.object(base, "download_binary", side_effect=fake_download),
+            ):
+                saved = base.save_crunchyroll_series_trailer(episode_meta, show_folder)
+
+            youtube_search.assert_not_called()
+            trailer = show_folder / "trailers" / "trailer.mp4"
+            self.assertEqual(saved, [trailer])
+            self.assertEqual(trailer.read_bytes(), b"provider trailer")
+
+    def test_crunchyroll_trailer_falls_back_to_official_youtube_last(self):
+        episode_meta = base.metadata_from_provider_dict(self.extract_episode())
+        with tempfile.TemporaryDirectory() as temp:
+            show_folder = Path(temp) / base.safe_filename(SHOW)
+            youtube_url = "https://www.youtube.com/watch?v=official-trailer"
+
+            def fake_youtube_download(url: str, target: Path):
+                self.assertEqual(url, youtube_url)
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_bytes(b"youtube trailer")
+                return target
+
+            with (
+                patch.object(
+                    base.crunchyroll,
+                    "find_official_youtube_trailer",
+                    return_value={"url": youtube_url, "id": "official-trailer"},
+                ),
+                patch.object(base, "download_youtube_trailer", side_effect=fake_youtube_download),
+            ):
+                saved = base.save_crunchyroll_series_trailer(episode_meta, show_folder)
+
+            trailer = show_folder / "trailers" / "trailer.mp4"
+            self.assertEqual(saved, [trailer])
+            self.assertEqual(trailer.read_bytes(), b"youtube trailer")
+
+    def test_youtube_download_uses_embedded_client_and_installed_runtime(self):
+        with tempfile.TemporaryDirectory() as temp:
+            target = Path(temp) / "trailers" / "trailer.mp4"
+            target.parent.mkdir()
+
+            def fake_run(command, **kwargs):
+                output = command[command.index("--output") + 1].replace("%(ext)s", "mp4")
+                Path(output).write_bytes(b"downloaded trailer")
+                self.assertIn("youtube:player_client=web_embedded", command)
+                self.assertIn("node:/usr/local/bin/node", command)
+                return base.subprocess.CompletedProcess(command, 0, "", "")
+
+            with (
+                patch.object(base.shutil, "which", side_effect=lambda name: "/usr/local/bin/node" if name == "node" else None),
+                patch.object(base.subprocess, "run", side_effect=fake_run),
+            ):
+                saved = base.download_youtube_trailer("https://www.youtube.com/watch?v=trailer", target)
+
+            self.assertEqual(saved, target)
+            self.assertEqual(target.read_bytes(), b"downloaded trailer")
+
     def test_episode_position_forms(self):
         for text in ("S01E01", "S1 E1", "Season 1 Episode 1", "Series 1 Episode 1", "1x01", "01-01", "E1"):
             with self.subTest(text=text):
@@ -338,7 +453,7 @@ class CrunchyrollProviderTests(unittest.TestCase):
             folder = Path(temp)
             source = folder / "E1.mp4"
             source.write_bytes(b"source")
-            season_folder = folder / base.safe_filename(SHOW) / "S01"
+            season_folder = folder / base.crunchyroll_series_folder_name(episode_meta) / "S01"
             season_folder.mkdir(parents=True)
             target = season_folder / f"{base.crunchyroll_target_base(episode_meta)}.mp4"
             target.write_bytes(b"existing")
@@ -391,7 +506,7 @@ class CrunchyrollProviderTests(unittest.TestCase):
             )
             second_prepared = base.prepare_crunchyroll_media_group(second_meta, second_group, settings)
 
-            show_folder = download_folder / base.safe_filename(SHOW)
+            show_folder = download_folder / base.crunchyroll_series_folder_name(episode_meta)
             self.assertEqual(first_prepared.folder, (show_folder / "S01").resolve())
             self.assertEqual(second_prepared.folder, (show_folder / "S01").resolve())
             self.assertTrue((show_folder / "S01" / f"{base.crunchyroll_target_base(episode_meta, first_group)}.mkv").exists())
@@ -401,13 +516,13 @@ class CrunchyrollProviderTests(unittest.TestCase):
     def test_relative_media_path_recognizes_current_series_folder(self):
         episode_meta = base.metadata_from_provider_dict(self.extract_episode())
         with tempfile.TemporaryDirectory() as temp:
-            show_folder = Path(temp) / base.safe_filename(SHOW)
-            show_folder.mkdir()
-            video = show_folder / f"crunchyroll-{EPISODE_ID}.mkv"
+            legacy_folder = Path(temp) / base.safe_filename(SHOW)
+            legacy_folder.mkdir()
+            video = legacy_folder / f"crunchyroll-{EPISODE_ID}.mkv"
             video.write_bytes(b"video")
             previous_directory = Path.cwd()
             try:
-                os.chdir(show_folder)
+                os.chdir(legacy_folder)
                 relative_video = Path(f"./crunchyroll-{EPISODE_ID}.mkv")
                 group = base.CrunchyrollMediaGroup(
                     folder=relative_video.parent,
@@ -427,8 +542,63 @@ class CrunchyrollProviderTests(unittest.TestCase):
             finally:
                 os.chdir(previous_directory)
 
+            show_folder = Path(temp) / base.crunchyroll_series_folder_name(episode_meta)
             self.assertEqual(prepared.folder, (show_folder / "S01").resolve())
-            self.assertFalse((show_folder / base.safe_filename(SHOW)).exists())
+            self.assertFalse(legacy_folder.exists())
+
+    def test_series_folder_name_uses_closed_and_current_year_ranges(self):
+        episode_meta = base.metadata_from_provider_dict(self.extract_episode())
+        self.assertEqual(
+            base.crunchyroll_series_folder_name(episode_meta),
+            "May I Ask for One Final Thing (2025)",
+        )
+        start, end, current = crunchyroll.series_run_years(
+            "2026",
+            [{"date": "2026-08-27"}],
+            current_date=date(2026, 8, 28),
+        )
+        episode_meta.series_start_year = start
+        episode_meta.series_end_year = end
+        episode_meta.series_is_current = current
+        self.assertEqual(
+            base.crunchyroll_series_folder_name(episode_meta),
+            "May I Ask for One Final Thing (2026-)",
+        )
+
+    def test_closed_year_range_renames_whole_current_series_folder(self):
+        episode_meta = base.metadata_from_provider_dict(self.extract_episode())
+        episode_meta.series_start_year = "2026"
+        episode_meta.series_end_year = "2026"
+        episode_meta.series_is_current = False
+        with tempfile.TemporaryDirectory() as temp:
+            current_folder = Path(temp) / f"{base.safe_filename(SHOW)} (2026-)"
+            season_folder = current_folder / "S01"
+            season_folder.mkdir(parents=True)
+            poster = current_folder / "poster.png"
+            video = season_folder / "E1.mkv"
+            poster.write_bytes(b"poster")
+            video.write_bytes(b"video")
+            group = base.CrunchyrollMediaGroup(
+                folder=season_folder,
+                stem="E1",
+                season=1,
+                episode=1,
+                files=[video],
+            )
+
+            prepared = base.prepare_crunchyroll_media_group(
+                episode_meta,
+                group,
+                {
+                    "crunchyroll_series_rename_enabled": True,
+                    "crunchyroll_series_organize_enabled": True,
+                },
+            )
+
+            closed_folder = Path(temp) / f"{base.safe_filename(SHOW)} (2026)"
+            self.assertFalse(current_folder.exists())
+            self.assertEqual(prepared.folder, (closed_folder / "S01").resolve())
+            self.assertEqual((closed_folder / "poster.png").read_bytes(), b"poster")
 
     def test_english_cc_is_kept_and_forced_sign_track_is_discarded(self):
         episode_meta = base.metadata_from_provider_dict(self.extract_episode())
@@ -469,7 +639,10 @@ class CrunchyrollProviderTests(unittest.TestCase):
             )
 
             target_base = base.crunchyroll_target_base(episode_meta, group)
-            self.assertEqual(prepared.folder, (folder / base.safe_filename(SHOW) / "S01").resolve())
+            self.assertEqual(
+                prepared.folder,
+                (folder / base.crunchyroll_series_folder_name(episode_meta) / "S01").resolve(),
+            )
             self.assertTrue((prepared.folder / f"{target_base}.en.cc.srt").exists())
             self.assertFalse((prepared.folder / f"{target_base}.en.forced.srt").exists())
             self.assertFalse(forced.exists())

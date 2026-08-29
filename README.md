@@ -65,7 +65,7 @@ It is intended for supported provider detail pages. It is not a video downloader
 - Saves the source site, detail page link, and fetched/canonical source URL in the NFO.
 - Downloads available poster, wide, and logo artwork.
 - Saves a downloaded wide image as `fanart`, `banner`, and `landscape` artwork.
-- Downloads available direct trailers, gallery images, and extra videos when the provider exposes usable direct URLs.
+- Downloads available direct trailers, gallery images, and extra videos when the provider exposes usable direct URLs; Crunchyroll alone can use a strictly matched official-channel YouTube trailer when its own catalog supplies none.
 - Lets you process one link at a time with a preview, or automatically process many links from `mylinks.txt`.
 - Can find a matching local video file and write metadata beside it.
 - Can rename a matching generic `master-...` video filename when that option is explicitly enabled.
@@ -133,8 +133,11 @@ Coverage depends on what the provider exposes in the public page data for each i
 
 - series title and description, launch year, studio, season tag, season count, episode count, genres, TV rating, audio languages, subtitle languages, sub/dub availability, content advisories, and Crunchyroll series ID
 - the visible average rating plus its exact rating total and the five-to-one-star distribution as ordered Jellyfin tags
+- the exact `Crunchyroll Provider` tag on every Crunchyroll series and episode NFO, alongside the existing provider tags
 - episode title, placement, description, release date, separate air/upload timestamps, exact runtime, original audio, audio/subtitle availability, advisories, next-episode details, and live upvote/downvote totals
 - the tall portrait image as Jellyfin `poster`, the wide image as `backdrop`, the transparent title art as `logo`, and a smaller 640-pixel episode rendition as `-thumb`
+- one series-level trailer under Jellyfin's native `trailers/trailer.mp4` layout, preferring a trailer exposed by Crunchyroll and otherwise accepting only an exact-title “Official Trailer” result from the verified official `@crunchyroll` or `@crunchyrolldubs` YouTube channels
+- Jellyfin series folders named `Series Title (Year)` for a completed single-year run, `Series Title (Start Year-End Year)` for a completed multi-year run, or `Series Title (Start Year-)` while episodes are currently airing
 - every public guide entry is used only as a lookup table; detailed episode metadata, NFOs, and thumbnails are fetched and saved only for episodes that actually exist in the configured local folders
 - Crunchyroll subscription video is not downloaded. This provider retrieves public catalog metadata and artwork only.
 
@@ -145,6 +148,7 @@ To run this tool as documented, you need:
 - **macOS** — this first release is supported and tested on macOS only.
 - **Python 3** — the launcher runs with `python3`.
 - **Internet access** — the tool fetches supported detail pages and any available local-metadata assets.
+- **yt-dlp, FFmpeg, and a supported YouTube JavaScript runtime** — required only for Crunchyroll's official-YouTube trailer fallback. Deno is used automatically by yt-dlp; installed Node, QuickJS, or Bun runtimes are enabled by the tool. Missing or ambiguous trailer results do not stop the metadata workflow.
 - **A supported public detail-page link** — use a page from one of the providers listed above, not a playback, manifest, or direct-stream URL.
 
 The project uses Python's standard library. No package installation is required for the documented baseline workflow.
@@ -436,11 +440,13 @@ With the default Crunchyroll settings, the chosen download location is treated a
 
 ```text
 Chosen Download Location/
-  May I Ask for One Final Thing/
+  May I Ask for One Final Thing (2025)/
     tvshow.nfo
     poster.png
     backdrop.png
     logo.png
+    trailers/
+      trailer.mp4
     S01/
       S01E01 May I Ask for One Final Thing - May I Kindly Beat the Tar Out of Those Evil Nobles (Pigs).mkv
       S01E01 May I Ask for One Final Thing - May I Kindly Beat the Tar Out of Those Evil Nobles (Pigs).und.srt
@@ -448,9 +454,11 @@ Chosen Download Location/
       S01E01 May I Ask for One Final Thing - May I Kindly Beat the Tar Out of Those Evil Nobles (Pigs)-thumb.png
 ```
 
-Later episodes downloaded into the same parent location reuse that series folder and are routed into their corresponding season folders. A location already named for the series is recognized—even when the handoff supplies a relative path such as `./episode.mkv`—and is never nested as `Series Name/Series Name/`.
+Later episodes downloaded into the same parent location reuse that year-qualified series folder and are routed into their corresponding season folders. The provider derives the start and latest years from Crunchyroll's launch year and released-episode dates. A show whose latest release is inside the active airing window uses an open range such as `Smoking Behind the Supermarket with You (2026-)`; a completed single-year run uses `Yuri!!! on ICE (2016)`, while a completed multi-year run uses `The Apothecary Diaries (2023-2025)`. A location already named for the series, including a legacy title-only folder, is recognized—even when the handoff supplies a relative path such as `./episode.mkv`—and is routed to the year-qualified sibling instead of being nested as `Series Name/Series Name/`.
 
 The transparent title image is fetched from Crunchyroll's public key-art endpoint. `tvshow.nfo` contains the main series description and series-level fields, while each NFO inside a season folder contains that episode's description and fields. This hierarchy is created from either a series page or an individual watch page, so a saved episode is never left without its main series metadata.
+
+Trailer discovery runs only after the current metadata, artwork, rename, organization, subtitle, NFO, and thumbnail workflow finishes. A provider-supplied Crunchyroll trailer suppresses YouTube searching. Otherwise, the fallback requires an exact normalized series-title match, “Official Trailer” in the video title, and a verified official Crunchyroll uploader. Downloads use YouTube's embedded client so public embeddable trailers do not require browser cookies; the tool saves nothing when those checks are ambiguous and never overwrites an existing local trailer.
 
 The episode vote tag and series breakdown tags are adjacent and ordered exactly for Jellyfin plugin consumption:
 

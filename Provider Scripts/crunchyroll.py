@@ -11,6 +11,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 import uuid
+from datetime import date, timedelta
 from typing import Any
 
 
@@ -20,6 +21,8 @@ API_ROOT = "https://www.crunchyroll.com/content/v2/cms"
 TOKEN_URL = "https://www.crunchyroll.com/auth/v1/token"
 LOCALE = "en-US"
 USER_AGENT = "Crunchyroll/1.8.0"
+OFFICIAL_YOUTUBE_HANDLES = {"@crunchyroll", "@crunchyrolldubs"}
+CURRENT_SERIES_WINDOW_DAYS = 45
 
 _TOKEN = ""
 _TOKEN_EXPIRES_AT = 0.0
@@ -90,6 +93,11 @@ def build_series_metadata(
     poster = largest_image(series_object.get("images"), "poster_tall")
     cover = largest_image(series_object.get("images"), "poster_wide")
     logo = title_logo_url(series_id)
+    trailer = direct_trailer_url(series_object, detail, nested)
+    start_year, end_year, is_current = series_run_years(
+        detail.get("series_launch_year") or nested.get("series_launch_year"),
+        episodes,
+    )
     fields: dict[str, list[str]] = {}
     add_field(fields, "Average Rating", average_rating_text(rating))
     add_field(fields, "Audio", locale_names(audio_locales))
@@ -110,12 +118,16 @@ def build_series_metadata(
         "show_title": title,
         "outline": clean_text(series_object.get("description")),
         "plot": clean_text(series_object.get("description")),
-        "year": clean_text(detail.get("series_launch_year") or nested.get("series_launch_year")),
+        "year": start_year,
+        "series_start_year": start_year,
+        "series_end_year": end_year,
+        "series_is_current": is_current,
         "numeric_rating": clean_text(rating.get("average")),
         "content_rating": first_value(detail.get("maturity_ratings") or nested.get("maturity_ratings")),
         "poster_url": poster,
         "fanart_url": cover,
         "logo_url": logo,
+        "trailer_url": trailer,
         "production_label": "Studio",
         "genres": dedupe(nested.get("tenant_categories") or []),
         "tags": tags,
@@ -139,8 +151,15 @@ def extract_episode_metadata(episode_id: str, source_url: str = "", timeout: int
     series_object = first_data(api_get(f"objects/{series_id}", timeout=timeout)) if series_id else {}
     series_nested = as_dict(series_object.get("series_metadata"))
     series_detail = first_data(api_get(f"series/{series_id}", timeout=timeout)) if series_id else {}
+    series_episodes = series_episode_guide(series_id, timeout=timeout) if series_id else []
     linked_series = (
-        build_series_metadata(series_id, series_object, series_detail, [], source_url=canonical_series_url(series_id, ""))
+        build_series_metadata(
+            series_id,
+            series_object,
+            series_detail,
+            series_episodes,
+            source_url=canonical_series_url(series_id, ""),
+        )
         if series_id and series_object
         else {}
     )
@@ -194,12 +213,16 @@ def extract_episode_metadata(episode_id: str, source_url: str = "", timeout: int
         "outline": clean_text(episode_object.get("description") or detail.get("description")),
         "plot": clean_text(episode_object.get("description") or detail.get("description")),
         "year": year_from_date(detail.get("episode_air_date") or embedded.get("episode_air_date")),
+        "series_start_year": clean_text(linked_series.get("series_start_year")),
+        "series_end_year": clean_text(linked_series.get("series_end_year")),
+        "series_is_current": bool(linked_series.get("series_is_current")),
         "date": iso_date(detail.get("episode_air_date") or embedded.get("episode_air_date")),
         "runtime_minutes": duration_minutes(duration_ms),
         "content_rating": first_value(detail.get("maturity_ratings") or embedded.get("maturity_ratings") or series_nested.get("maturity_ratings")),
         "poster_url": largest_image(series_object.get("images"), "poster_tall"),
         "fanart_url": largest_image(series_object.get("images"), "poster_wide"),
         "logo_url": title_logo_url(series_id),
+        "trailer_url": clean_text(linked_series.get("trailer_url")),
         "thumb_url": thumbnail_image(episode_object.get("images") or detail.get("images")),
         "language": original_audio,
         "production_label": "Studio",
@@ -227,6 +250,121 @@ def series_episode_guide(series_id: str, timeout: int = 25) -> list[dict[str, An
                 record["season"] = season_number
                 records.append(record)
     return dedupe_records(records)
+
+
+def direct_trailer_url(*sources: Any) -> str:
+    """Return a provider-supplied trailer before any external fallback is considered."""
+    trailer_keys = {"trailer", "trailer_url", "promo", "promo_url", "preview", "preview_url"}
+
+    def url_from_value(value: Any) -> str:
+        if isinstance(value, str):
+            parsed = urllib.parse.urlparse(clean_text(value))
+            return value if parsed.scheme in {"http", "https"} else ""
+        if isinstance(value, dict):
+            for key in ("url", "source", "href", "playback_url"):
+                found = url_from_value(value.get(key))
+                if found:
+                    return found
+        if isinstance(value, list):
+            for item in value:
+                found = url_from_value(item)
+                if found:
+                    return found
+        return ""
+
+    for source in sources:
+        if not isinstance(source, dict):
+            continue
+        for key, value in source.items():
+            if clean_text(key).casefold() in trailer_keys:
+                found = url_from_value(value)
+                if found:
+                    return found
+    return ""
+
+
+def find_official_youtube_trailer(title: str, timeout: int = 45) -> dict[str, str]:
+    """Find one exact official Crunchyroll trailer without accepting fan uploads or loose title matches."""
+    series_title = clean_text(title)
+    if not series_title:
+        return {}
+    command = [
+        "yt-dlp",
+        "--flat-playlist",
+        "--dump-single-json",
+        "--skip-download",
+        "--no-warnings",
+        f"ytsearch20:{series_title} Official Trailer",
+    ]
+    try:
+        result = subprocess.run(
+            command,
+            capture_output=True,
+            check=False,
+            text=True,
+            timeout=timeout,
+        )
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        return {}
+    if result.returncode != 0:
+        return {}
+    try:
+        entries = json.loads(result.stdout).get("entries", [])
+    except (AttributeError, json.JSONDecodeError):
+        return {}
+    wanted = youtube_title_key(series_title)
+    for entry in entries:
+        if not isinstance(entry, dict):
+            continue
+        video_title = clean_text(entry.get("title"))
+        title_match = re.match(r"^(.*?)\s*(?:[|｜]|-)\s*official trailer(?:\b|$)", video_title, re.IGNORECASE)
+        if (
+            clean_text(entry.get("uploader_id")).casefold() not in OFFICIAL_YOUTUBE_HANDLES
+            or not title_match
+            or youtube_title_key(title_match.group(1)) != wanted
+        ):
+            continue
+        video_id = clean_text(entry.get("id"))
+        url = clean_text(entry.get("url"))
+        if not url and video_id:
+            url = f"https://www.youtube.com/watch?v={video_id}"
+        if url:
+            return {
+                "url": url,
+                "id": video_id,
+                "title": video_title,
+                "channel": clean_text(entry.get("channel") or entry.get("uploader")),
+            }
+    return {}
+
+
+def youtube_title_key(value: Any) -> str:
+    return re.sub(r"[^a-z0-9]+", "", clean_text(value).casefold())
+
+
+def series_run_years(
+    launch_year: Any,
+    episodes: list[dict[str, Any]],
+    current_date: date | None = None,
+) -> tuple[str, str, bool]:
+    """Return Crunchyroll's series start year, latest released year, and actively-airing state."""
+    start = clean_text(launch_year)
+    episode_dates: list[date] = []
+    for episode in episodes:
+        value = clean_text(episode.get("date"))
+        try:
+            episode_dates.append(date.fromisoformat(value))
+        except ValueError:
+            continue
+    if not start and episode_dates:
+        start = str(min(episode_dates).year)
+    if not start.isdigit():
+        return "", "", False
+    latest = max(episode_dates, default=None)
+    end = str(latest.year) if latest else start
+    today = current_date or date.today()
+    is_current = bool(latest and latest >= today - timedelta(days=CURRENT_SERIES_WINDOW_DAYS))
+    return start, end, is_current
 
 
 def episode_record(episode_object: dict[str, Any], detail: dict[str, Any], preferred_id: str = "") -> dict[str, Any]:
@@ -335,7 +473,7 @@ def canonical_episode_url(episode_id: str, slug: str) -> str:
 
 
 def provider_tags(detail: dict[str, Any]) -> list[str]:
-    tags = [NAME, f"Provider: {NAME}"]
+    tags = [NAME, f"Provider: {NAME}", "Crunchyroll Provider"]
     if detail.get("is_subbed"):
         tags.append("Subtitled")
     if detail.get("is_dubbed"):
