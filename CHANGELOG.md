@@ -21,6 +21,8 @@ All notable project changes are documented here. Published entries are derived f
 - User-designated related-world public teaser attachment for *Avatar Aang: The Last Airbender*, while preserving the teaser's own *Avatar: Seven Havens* identity and metadata.
 - Paramount+ source and provider tags in generated NFO metadata.
 - Crunchyroll-parity Paramount+ episode handoffs that resolve the parent show, save a complete series-root bundle, preserve episode thumbnails, and add the exact `Paramount+ Provider` tag.
+- Crunchyroll-standard Disney+ series and `/play/...` episode support using canonical parent entities and complete public multi-season SEO guides.
+- Disney+ portrait poster composition, backdrop, transparent logo, reconstructed 1920-wide episode thumbnails, accessibility/creator fields, and the exact `Disney+ Provider` tag.
 
 ### Changed
 
@@ -42,6 +44,10 @@ All notable project changes are documented here. Published entries are derived f
 - Paramount+ public previews now use Jellyfin's native `trailers/trailer.mp4` location and remain optional and non-fatal when FFmpeg is missing or a preview cannot be safely remuxed.
 - Paramount+ movies now save in `Output/Paramount+/Movie Title (Year)/`; a matched local movie and directly matching subtitles are safely moved there and renamed to `Movie Title (Year)` after destination collision checks.
 - README coverage, provider badge, and media-matching documentation now include Paramount+.
+- Disney+ series handoffs now safely rename explicit media and subtitle sidecars, organize year-qualified series/season folders, refuse collisions, reject ambiguous broad-root matches, and write only locally present episodes.
+- Disney+ `/play/...` webpages are no longer treated as trailer files; only an explicitly trailer-labelled direct media URL can use Jellyfin's native `trailers/trailer.mp4` location.
+- Disney+ movies now use `Output/Disney+/Movie Title (Year)/` with collision-safe local movie/subtitle organization.
+- Disney+ movie handoffs now keep completed media beneath MediaFab's supplied destination instead of moving it into the tool's configured `Output/Disney+` directory, including exact completed-file handoffs and matching subtitle sidecars.
 
 ## 2026-07-24 — BBC iPlayer series metadata provider
 

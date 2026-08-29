@@ -175,6 +175,15 @@ class CrunchyrollMediaGroup:
 
 
 @dataclass
+class DisneyPlusMediaGroup:
+    folder: Path
+    stem: str
+    season: int
+    episode: int
+    files: list[Path] = field(default_factory=list)
+
+
+@dataclass
 class ParamountPlusMediaGroup:
     folder: Path
     stem: str
@@ -363,32 +372,10 @@ def metadata_from_provider_dict(item: dict[str, Any], detail_link: str = "") -> 
 
 
 def metadata_from_disneyplus(url: str, detail_link: str = "") -> Metadata:
-    item = disneyplus.extract_metadata(url, timeout=HTTP_TIMEOUT_SECONDS)
-    meta = Metadata(source_url=clean_text(item.source_url) or detail_link, detail_link=detail_link)
-    meta.source_site = clean_text(item.NAME if hasattr(item, "NAME") else "Disney+")
-    meta.title = clean_text(item.title)
-    meta.folder_name_override = clean_text(item.title)
-    meta.outline = clean_text(item.short_description or item.long_description)
-    meta.plot = clean_text(item.long_description or item.short_description)
-    meta.year = clean_text(item.year)
-    meta.runtime_minutes = clean_text(item.runtime_minutes)
-    meta.content_rating = clean_text(item.content_rating)
-    meta.poster_url = clean_text(item.poster_url)
-    meta.fanart_url = clean_text(item.wide_url)
-    meta.logo_url = clean_text(item.logo_url)
-    meta.trailer_url = clean_text(item.trailer_url)
-    meta.production_label = "Provider"
-    meta.add_values("genres", item.genres)
-    meta.add_values("studios", [disneyplus.STUDIO_NAME])
-    meta.add_values("directors", item.directors)
-    meta.actors = [Actor(name=clean_text(name)) for name in item.cast if clean_text(name)]
-    if clean_text(item.entity_id):
-        meta.unique_ids["disneyplus"] = clean_text(item.entity_id)
-        meta.add_extra("Disney+ Entity ID", item.entity_id)
-    if clean_text(item.category):
-        meta.add_extra("Category", item.category)
-    clean_final_metadata(meta)
-    return meta
+    return metadata_from_provider_dict(
+        disneyplus.extract_metadata(url, timeout=HTTP_TIMEOUT_SECONDS),
+        detail_link=detail_link or url,
+    )
 
 
 def scrape_url(url: str) -> Metadata:
@@ -470,7 +457,7 @@ def clean_final_metadata(meta: Metadata) -> None:
 
 
 def format_preview(meta: Metadata) -> str:
-    jellyfin_named_art = meta.source_site in {crunchyroll.NAME, paramountplus.NAME}
+    jellyfin_named_art = meta.source_site in {crunchyroll.NAME, disneyplus.NAME, paramountplus.NAME}
     rows = [
         ("Source Site", meta.source_site),
         ("Detail Link Given", meta.detail_link),
@@ -633,6 +620,10 @@ def find_media_match(meta: Metadata, settings: dict[str, Any], explicit_folder: 
 def media_match_for_folder(meta: Metadata, folder: Path) -> MediaMatch | None:
     if not folder.exists():
         return None
+    if folder.is_file():
+        if folder.suffix.casefold() not in VIDEO_EXTENSIONS:
+            return None
+        return MediaMatch(folder=folder.parent, video_path=folder, filename_base=folder.stem, score=1.0)
     videos = sorted(
         [path for path in folder.iterdir() if path.is_file() and path.suffix.casefold() in VIDEO_EXTENSIONS]
     )
@@ -670,6 +661,8 @@ def safe_filename(text: str) -> str:
 def default_folder_name(meta: Metadata) -> str:
     if is_paramountplus_movie(meta):
         return paramountplus_movie_name(meta)
+    if is_disneyplus_movie(meta):
+        return disneyplus_movie_name(meta)
     if meta.folder_name_override:
         return safe_filename(meta.folder_name_override)
     if meta.studios and meta.source_site.casefold() != "netflix":
@@ -684,6 +677,44 @@ def is_paramountplus_movie(meta: Metadata) -> bool:
 def paramountplus_movie_name(meta: Metadata) -> str:
     title = safe_filename(meta.title)
     return safe_filename(f"{title} ({meta.year})") if meta.year.isdigit() else title
+
+
+def is_disneyplus_movie(meta: Metadata) -> bool:
+    return meta.source_site == disneyplus.NAME and meta.media_kind.casefold() == "movie"
+
+
+def disneyplus_movie_name(meta: Metadata) -> str:
+    title = safe_filename(meta.title)
+    return safe_filename(f"{title} ({meta.year})") if meta.year.isdigit() else title
+
+
+def organize_disneyplus_movie(
+    match: MediaMatch,
+    meta: Metadata,
+    settings: dict[str, Any],
+    explicit_folder: str = "",
+) -> MediaMatch:
+    if not is_disneyplus_movie(meta) or not match.video_path.exists():
+        return match
+    base = disneyplus_movie_name(meta)
+    destination_parent = match.folder if explicit_folder else settings_output_dir(settings) / disneyplus.NAME
+    destination = destination_parent / base
+    source_stem = match.video_path.stem
+    related_files = [
+        path for path in match.folder.iterdir()
+        if path.is_file()
+        and path.suffix.casefold() in VIDEO_EXTENSIONS | {".srt", ".vtt", ".ass", ".ssa", ".sub"}
+        and (path.stem == source_stem or path.name.startswith(source_stem + "."))
+    ]
+    targets = [destination / (base + path.name[len(source_stem):]) for path in related_files]
+    if any(target.exists() and target not in related_files for target in targets):
+        raise FileExistsError(f"Disney+ movie destination already exists: {destination}")
+    destination.mkdir(parents=True, exist_ok=True)
+    for source, target in zip(related_files, targets):
+        if source != target:
+            shutil.move(str(source), str(target))
+    video_target = destination / (base + match.video_path.suffix)
+    return MediaMatch(destination, video_target, base, match.score)
 
 
 def organize_paramountplus_movie(match: MediaMatch, meta: Metadata, settings: dict[str, Any]) -> MediaMatch:
@@ -1513,6 +1544,275 @@ def save_crunchyroll_series_metadata(
     return saved
 
 
+def disneyplus_series_enabled(
+    meta: Metadata, settings: dict[str, Any], explicit_folder: str = ""
+) -> bool:
+    return (
+        meta.source_site == disneyplus.NAME
+        and meta.media_kind.casefold() in {"series", "episode"}
+        and bool(meta.series_episodes)
+        and bool(settings.get("disneyplus_series_metadata_enabled", True))
+        and bool(explicit_folder or media_search_roots(settings))
+    )
+
+
+def disneyplus_media_groups(
+    meta: Metadata, settings: dict[str, Any], explicit_folder: str = ""
+) -> list[tuple[DisneyPlusMediaGroup, dict[str, Any]]]:
+    guide = {
+        (int(record["season"]), int(record["episode"])): record
+        for record in meta.series_episodes
+        if clean_text(record.get("season")).isdigit() and clean_text(record.get("episode")).isdigit()
+    }
+    roots = [Path(explicit_folder).expanduser().resolve()] if explicit_folder else media_search_roots(settings)
+    candidates: list[Path] = []
+    for root in roots:
+        if not root.exists():
+            continue
+        if root.is_file() and root.suffix.casefold() in VIDEO_EXTENSIONS:
+            candidates.append(root)
+            continue
+        for folder_text, _dirs, filenames in os.walk(root):
+            candidates.extend(
+                Path(folder_text) / filename
+                for filename in filenames
+                if Path(filename).suffix.casefold() in VIDEO_EXTENSIONS
+            )
+    wanted_title = normalize_match_key(meta.show_title or meta.title)
+    direct_position = None
+    if meta.media_kind.casefold() == "episode" and meta.season_number.isdigit() and meta.episode_number.isdigit():
+        direct_position = (int(meta.season_number), int(meta.episode_number))
+    matched: list[tuple[DisneyPlusMediaGroup, dict[str, Any]]] = []
+    for video in sorted(set(candidates)):
+        if not explicit_folder and wanted_title not in normalize_match_key(str(video)):
+            continue
+        position = paramountplus_episode_position(f"{video.stem} {video.parent.name}")
+        if explicit_folder and len(candidates) == 1 and direct_position:
+            position = direct_position
+        record = guide.get(position) if position else None
+        if not (position and record):
+            continue
+        files = [video]
+        for sidecar in video.parent.iterdir():
+            if (
+                sidecar.is_file()
+                and sidecar.suffix.casefold() in {".srt", ".vtt", ".ass", ".ssa", ".sub"}
+                and (sidecar.stem == video.stem or sidecar.name.startswith(video.stem + "."))
+            ):
+                files.append(sidecar)
+        matched.append((DisneyPlusMediaGroup(video.parent, video.stem, *position, files), record))
+    return sorted(matched, key=lambda item: (item[0].season, item[0].episode, str(item[0].folder)))
+
+
+def disneyplus_target_base(meta: Metadata, group: DisneyPlusMediaGroup | None = None) -> str:
+    season = group.season if group else int(meta.season_number or 1)
+    episode = group.episode if group else int(meta.episode_number or 0)
+    base = f"S{season:02d}E{episode:02d} {meta.show_title or meta.title}"
+    if meta.episode_title:
+        base += f" - {meta.episode_title}"
+    return safe_filename(base)
+
+
+def disneyplus_series_folder_name(meta: Metadata) -> str:
+    title = safe_filename(meta.show_title or meta.title)
+    start = clean_text(meta.series_start_year)
+    end = clean_text(meta.series_end_year)
+    if not start.isdigit():
+        return title
+    if meta.series_is_current:
+        years = f"{start}-"
+    elif not end or end == start:
+        years = start
+    else:
+        years = f"{start}-{end}"
+    return safe_filename(f"{title} ({years})")
+
+
+def disneyplus_show_folder(folder: Path, meta: Metadata) -> Path:
+    resolved = folder.resolve()
+    root = resolved.parent if re.fullmatch(r"S\d{1,2}", resolved.name, re.I) else resolved
+    desired_name = disneyplus_series_folder_name(meta)
+    if normalize_match_key(root.name) == normalize_match_key(desired_name):
+        return root
+    legacy_name = re.sub(r" \(\d{4}(?:-(?:\d{4})?)?\)$", "", root.name)
+    if normalize_match_key(legacy_name) == normalize_match_key(safe_filename(meta.show_title or meta.title)):
+        return root.parent / desired_name
+    return root / desired_name
+
+
+def migrate_disneyplus_series_folder(group: DisneyPlusMediaGroup, meta: Metadata) -> DisneyPlusMediaGroup:
+    folder = group.folder.resolve()
+    root = folder.parent if re.fullmatch(r"S\d{1,2}", folder.name, re.I) else folder
+    title = safe_filename(meta.show_title or meta.title)
+    root_title = re.sub(r" \(\d{4}(?:-(?:\d{4})?)?\)$", "", root.name)
+    if normalize_match_key(root_title) != normalize_match_key(title):
+        return group
+    desired = root.parent / disneyplus_series_folder_name(meta)
+    if desired == root:
+        return group
+    if desired.exists():
+        raise FileExistsError(f"Disney+ series folder already exists: {desired}")
+    relative_folder = folder.relative_to(root)
+    relative_files = [path.resolve().relative_to(root) for path in group.files]
+    root.rename(desired)
+    return DisneyPlusMediaGroup(
+        desired / relative_folder, group.stem, group.season, group.episode,
+        [desired / path for path in relative_files],
+    )
+
+
+def prepare_disneyplus_media_group(
+    meta: Metadata, group: DisneyPlusMediaGroup, settings: dict[str, Any]
+) -> DisneyPlusMediaGroup:
+    rename = bool(settings.get("disneyplus_series_rename_enabled", True))
+    organize = bool(settings.get("disneyplus_series_organize_enabled", True))
+    if not (rename or organize):
+        return group
+    if organize:
+        group = migrate_disneyplus_series_folder(group, meta)
+    destination = disneyplus_show_folder(group.folder, meta) / f"S{group.season:02d}" if organize else group.folder
+    base = disneyplus_target_base(meta, group) if rename else group.stem
+    targets: list[tuple[Path, Path]] = []
+    used: set[Path] = set()
+    for source in group.files:
+        suffix = source.name[len(group.stem):]
+        target = destination / ((base + suffix) if rename else source.name)
+        if target in used or (target.exists() and target not in group.files):
+            raise FileExistsError(f"Disney+ rename target already exists: {target}")
+        used.add(target)
+        targets.append((source, target))
+    destination.mkdir(parents=True, exist_ok=True)
+    temporary: list[tuple[Path, Path]] = []
+    for index, (source, target) in enumerate(targets, start=1):
+        if source == target:
+            temporary.append((source, target))
+            continue
+        temp = source.with_name(f".disneyplus-rename-{index}-{source.name}")
+        source.rename(temp)
+        temporary.append((temp, target))
+    for temporary_path, target in temporary:
+        if temporary_path != target:
+            temporary_path.rename(target)
+    final_files = [target for _source, target in targets]
+    video = next((path for path in final_files if path.suffix.casefold() in VIDEO_EXTENSIONS), None)
+    return DisneyPlusMediaGroup(destination, video.stem if video else base, group.season, group.episode, final_files)
+
+
+def disneyplus_episode_metadata(meta: Metadata, record: dict[str, Any]) -> Metadata:
+    episode_id = clean_text(record.get("id"))
+    episode = Metadata(
+        source_url=clean_text(record.get("url")) or meta.source_url,
+        detail_link=clean_text(record.get("url")), source_site=meta.source_site, media_kind="episode",
+        title=meta.title, show_title=clean_text(record.get("show_title")) or meta.title,
+        season_number=clean_text(record.get("season")), episode_number=clean_text(record.get("episode")),
+        episode_title=clean_text(record.get("title")), outline=clean_text(record.get("description")),
+        plot=clean_text(record.get("description")), year=meta.year,
+        series_start_year=meta.series_start_year, series_end_year=meta.series_end_year,
+        series_is_current=meta.series_is_current, content_rating=meta.content_rating,
+        poster_url=meta.poster_url, fanart_url=meta.fanart_url, logo_url=meta.logo_url,
+        thumb_url=clean_text(record.get("image")), trailer_url=meta.trailer_url,
+        genres=list(meta.genres), tags=list(meta.tags), studios=list(meta.studios),
+        directors=list(meta.directors), actors=list(meta.actors),
+        unique_ids={"disneyplus": episode_id} if episode_id else {}, series_metadata=meta.series_metadata,
+    )
+    for label in ("Disney+ entity ID", "Season count", "Accessibility"):
+        for value in meta.extra_fields.get(label, []):
+            episode.add_extra(label, value)
+    episode.add_extra("Disney+ episode ID", episode_id)
+    episode.add_extra("Episode page", episode.detail_link)
+    return episode
+
+
+def save_disneyplus_show_art(meta: Metadata, folder: Path) -> list[Path]:
+    saved: list[Path] = []
+    for artwork_type, url in (("poster", meta.poster_url), ("backdrop", meta.fanart_url), ("logo", meta.logo_url)):
+        if not clean_text(url):
+            continue
+        extension = image_extension_from_url(url) or (".png" if artwork_type == "logo" else ".jpg")
+        target = folder / f"{artwork_type}{extension}"
+        if target.exists():
+            continue
+        path = download_binary(url, target)
+        if path:
+            saved.append(path)
+    return saved
+
+
+def ensure_disneyplus_series_bundle(meta: Metadata, show_folder: Path) -> list[Path]:
+    show_folder.mkdir(parents=True, exist_ok=True)
+    if meta.media_kind.casefold() == "series":
+        series_meta = meta
+    elif meta.series_metadata:
+        series_meta = metadata_from_provider_dict(meta.series_metadata, detail_link=clean_text(meta.series_metadata.get("source_url")))
+    else:
+        raise ValueError("Disney+ episode metadata did not include its linked series metadata.")
+    if series_meta.media_kind.casefold() != "series" or not series_meta.plot:
+        raise ValueError("Disney+ linked series metadata was incomplete; episode metadata was not saved.")
+    saved: list[Path] = []
+    nfo = show_folder / "tvshow.nfo"
+    if not nfo.exists():
+        nfo.write_text(build_nfo(series_meta), encoding="utf-8")
+        saved.append(nfo)
+    saved.extend(save_disneyplus_show_art(series_meta, show_folder))
+    return saved
+
+
+def save_disneyplus_series_trailer(meta: Metadata, show_folder: Path) -> list[Path]:
+    trailer_dir = show_folder / "trailers"
+    if trailer_dir.exists() and any(path.is_file() and path.suffix.casefold() in VIDEO_EXTENSIONS for path in trailer_dir.iterdir()):
+        return []
+    if not clean_text(meta.trailer_url):
+        return []
+    trailer_dir.mkdir(parents=True, exist_ok=True)
+    trailer = download_binary(meta.trailer_url, trailer_dir / "trailer.mp4")
+    return [trailer] if trailer else []
+
+
+def save_disneyplus_series_metadata(
+    meta: Metadata, settings: dict[str, Any], explicit_folder: str = "", skip_existing: bool = False
+) -> list[Path] | None:
+    if not disneyplus_series_enabled(meta, settings, explicit_folder):
+        return None
+    matches = disneyplus_media_groups(meta, settings, explicit_folder)
+    if not matches:
+        return None
+    saved: list[Path] = []
+    bundled: set[Path] = set()
+    trailer_meta_for: dict[Path, Metadata] = {}
+    for group, record in matches:
+        episode_meta = meta if (
+            meta.media_kind.casefold() == "episode"
+            and meta.season_number == str(group.season)
+            and meta.episode_number == str(group.episode)
+        ) else disneyplus_episode_metadata(meta, record)
+        episode_meta.season_number = str(group.season)
+        episode_meta.episode_number = str(group.episode)
+        prepared = prepare_disneyplus_media_group(episode_meta, group, settings)
+        show_folder = disneyplus_show_folder(prepared.folder, episode_meta)
+        if show_folder not in bundled:
+            saved.extend(ensure_disneyplus_series_bundle(meta if meta.media_kind.casefold() == "series" else episode_meta, show_folder))
+            bundled.add(show_folder)
+        trailer_meta_for[show_folder] = meta if meta.media_kind.casefold() == "series" else episode_meta
+        video = next((path for path in prepared.files if path.suffix.casefold() in VIDEO_EXTENSIONS), None)
+        if not video:
+            continue
+        nfo = video.with_suffix(".nfo")
+        if not (skip_existing and nfo.exists()):
+            nfo.write_text(build_nfo(episode_meta), encoding="utf-8")
+            saved.append(nfo)
+        extension = image_extension_from_url(episode_meta.thumb_url) or ".jpg"
+        thumb = video.with_name(f"{video.stem}-thumb{extension}")
+        if episode_meta.thumb_url and not thumb.exists():
+            path = download_binary(episode_meta.thumb_url, thumb)
+            if path:
+                saved.append(path)
+    for show_folder, trailer_meta in trailer_meta_for.items():
+        series_meta = metadata_from_provider_dict(trailer_meta.series_metadata) if trailer_meta.series_metadata else trailer_meta
+        saved.extend(save_disneyplus_series_trailer(series_meta, show_folder))
+    print(f"Disney+ series mode found {len(matches)} local episode(s) and saved {len(saved)} item(s).")
+    return saved
+
+
 def paramountplus_series_enabled(
     meta: Metadata, settings: dict[str, Any], explicit_folder: str = ""
 ) -> bool:
@@ -1868,6 +2168,14 @@ def save_provider_series_metadata(
     )
     if saved is not None:
         return saved
+    saved = save_disneyplus_series_metadata(
+        meta,
+        settings,
+        explicit_folder=explicit_folder,
+        skip_existing=skip_existing,
+    )
+    if saved is not None:
+        return saved
     return save_paramountplus_series_metadata(
         meta,
         settings,
@@ -1880,11 +2188,30 @@ def output_plan(meta: Metadata, settings: dict[str, Any], explicit_folder: str =
     match = find_media_match(meta, settings, explicit_folder=explicit_folder)
     if match:
         match = maybe_rename_generic_video(match, meta, settings)
+        match = organize_disneyplus_movie(match, meta, settings, explicit_folder=explicit_folder)
         match = organize_paramountplus_movie(match, meta, settings)
         return match.folder, match.filename_base
+    if is_disneyplus_movie(meta):
+        base = disneyplus_movie_name(meta)
+        return settings_output_dir(settings) / disneyplus.NAME / base, base
     if is_paramountplus_movie(meta):
         base = paramountplus_movie_name(meta)
         return settings_output_dir(settings) / paramountplus.NAME / base, base
+    if meta.source_site == disneyplus.NAME and meta.media_kind.casefold() == "series":
+        return settings_output_dir(settings) / disneyplus_series_folder_name(meta), "tvshow"
+    if (
+        meta.source_site == disneyplus.NAME
+        and meta.media_kind.casefold() == "episode"
+        and meta.season_number.isdigit()
+        and meta.episode_number.isdigit()
+    ):
+        base = disneyplus_target_base(meta)
+        return (
+            settings_output_dir(settings)
+            / disneyplus_series_folder_name(meta)
+            / f"S{int(meta.season_number):02d}",
+            base,
+        )
     if meta.source_site == paramountplus.NAME and meta.media_kind.casefold() == "series":
         return settings_output_dir(settings) / paramountplus_series_folder_name(meta), "tvshow"
     if (
@@ -1927,10 +2254,14 @@ def save_metadata_bundle(meta: Metadata, settings: dict[str, Any], explicit_fold
     folder, base_name = output_plan(meta, settings, explicit_folder=explicit_folder)
     saved: list[Path] = []
     crunchyroll_series_folder: Path | None = None
+    disneyplus_series_folder: Path | None = None
     paramountplus_series_folder: Path | None = None
     if meta.source_site == crunchyroll.NAME and meta.media_kind.casefold() == "episode":
         crunchyroll_series_folder = crunchyroll_show_folder(folder, meta)
         saved.extend(ensure_crunchyroll_series_bundle(meta, crunchyroll_series_folder))
+    if meta.source_site == disneyplus.NAME and meta.media_kind.casefold() == "episode":
+        disneyplus_series_folder = disneyplus_show_folder(folder, meta)
+        saved.extend(ensure_disneyplus_series_bundle(meta, disneyplus_series_folder))
     if meta.source_site == paramountplus.NAME and meta.media_kind.casefold() == "episode":
         paramountplus_series_folder = paramountplus_show_folder(folder, meta)
         saved.extend(ensure_paramountplus_series_bundle(meta, paramountplus_series_folder))
@@ -1938,6 +2269,10 @@ def save_metadata_bundle(meta: Metadata, settings: dict[str, Any], explicit_fold
     if meta.source_site == crunchyroll.NAME:
         crunchyroll_series_folder = crunchyroll_series_folder or crunchyroll_show_folder(folder, meta)
         saved.extend(save_crunchyroll_series_trailer(meta, crunchyroll_series_folder))
+    if meta.source_site == disneyplus.NAME and meta.media_kind.casefold() in {"series", "episode"}:
+        disneyplus_series_folder = disneyplus_series_folder or disneyplus_show_folder(folder, meta)
+        trailer_meta = metadata_from_provider_dict(meta.series_metadata) if meta.series_metadata else meta
+        saved.extend(save_disneyplus_series_trailer(trailer_meta, disneyplus_series_folder))
     if meta.source_site == paramountplus.NAME and meta.media_kind.casefold() in {"series", "episode"}:
         paramountplus_series_folder = paramountplus_series_folder or paramountplus_show_folder(folder, meta)
         trailer_meta = metadata_from_provider_dict(meta.series_metadata) if meta.series_metadata else meta
@@ -1972,15 +2307,17 @@ def save_metadata_bundle_to_location(
         saved.append(thumb)
     if not include_artwork:
         return saved
-    if (
-        meta.source_site == crunchyroll.NAME
-        or (meta.source_site == paramountplus.NAME and meta.media_kind.casefold() in {"series", "episode"})
+    if meta.source_site == crunchyroll.NAME or (
+        meta.source_site in {disneyplus.NAME, paramountplus.NAME}
+        and meta.media_kind.casefold() in {"series", "episode"}
     ):
         show_folder = folder
         if meta.media_kind.casefold() == "episode" and re.fullmatch(r"S\d{2}", folder.name, re.IGNORECASE):
             show_folder = folder.parent
         if meta.source_site == crunchyroll.NAME:
             saved.extend(save_crunchyroll_show_art(meta, show_folder))
+        elif meta.source_site == disneyplus.NAME:
+            saved.extend(save_disneyplus_show_art(meta, show_folder))
         else:
             saved.extend(save_paramountplus_show_art(meta, show_folder))
         return saved
@@ -2041,7 +2378,9 @@ def save_metadata_bundle_to_location(
                 saved.append(path)
 
     if meta.trailer_url:
-        trailer_dir = folder / ("trailers" if meta.source_site == paramountplus.NAME else "Extras/Trailers")
+        trailer_dir = folder / (
+            "trailers" if meta.source_site in {disneyplus.NAME, paramountplus.NAME} else "Extras/Trailers"
+        )
         trailer_dir.mkdir(parents=True, exist_ok=True)
         trailer = download_binary(meta.trailer_url, trailer_dir / "trailer.mp4")
         if trailer:
