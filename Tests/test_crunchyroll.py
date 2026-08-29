@@ -442,6 +442,37 @@ class CrunchyrollProviderTests(unittest.TestCase):
             self.assertEqual(saved, target)
             self.assertEqual(target.read_bytes(), b"downloaded trailer")
 
+    def test_missing_youtube_tools_skip_only_optional_trailer(self):
+        with tempfile.TemporaryDirectory() as temp:
+            target = Path(temp) / "trailers" / "trailer.mp4"
+            target.parent.mkdir()
+            with (
+                patch.object(base.shutil, "which", return_value=None),
+                patch.object(base.subprocess, "run", side_effect=FileNotFoundError),
+            ):
+                saved = base.download_youtube_trailer(
+                    "https://www.youtube.com/watch?v=trailer",
+                    target,
+                )
+
+            self.assertIsNone(saved)
+            self.assertFalse(target.exists())
+
+    def test_other_provider_never_invokes_crunchyroll_trailer_path(self):
+        with tempfile.TemporaryDirectory() as temp:
+            meta = base.Metadata(
+                source_url="https://example.test/movie",
+                source_site="Netflix",
+                media_kind="movie",
+                title="Example Movie",
+                plot="Example metadata",
+            )
+            with patch.object(base, "save_crunchyroll_series_trailer") as trailer_save:
+                saved = base.save_metadata_bundle(meta, {"default_output_dir": temp})
+
+            trailer_save.assert_not_called()
+            self.assertTrue(any(path.suffix == ".nfo" for path in saved))
+
     def test_episode_position_forms(self):
         for text in ("S01E01", "S1 E1", "Season 1 Episode 1", "Series 1 Episode 1", "1x01", "01-01", "E1"):
             with self.subTest(text=text):

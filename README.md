@@ -45,7 +45,11 @@
 
 ## About the Project
 
-Media Metadata and Extras Getter by mp3li is for regular video media—not specifically for live performances. It gathers information that supported public detail pages expose and saves it as a local metadata bundle: an NFO file plus available artwork, trailers, gallery images, and extra videos.
+Media Metadata and Extras Getter by mp3li is for regular video media—not specifically for live performances.
+
+For a version of this tool specifically made for live performances, including Amazon Prime Video, OperaVision, Metropolitan Opera, BroadwayHD, MarqueeTV, PBS Great Performances, Disney+, and Netflix, check out [Live Performance Metadata and Extras Getter by mp3li](https://github.com/mp3li/Live-Performance-Metadata-and-Extras-Getter).
+
+It gathers information that supported public detail pages expose and saves it as a local metadata bundle: an NFO file plus available artwork, trailers, gallery images, and extra videos.
 
 The filenames and folder layout are designed to work especially well with Jellyfin's local-metadata conventions. The output is not locked to Jellyfin, though: the files stay local, use a standard XML NFO structure, and can also support your own organized media folders or other software that reads local NFO files and artwork.
 
@@ -143,15 +147,26 @@ Coverage depends on what the provider exposes in the public page data for each i
 
 ## Requirements
 
-To run this tool as documented, you need:
+### Core requirements
+
+These requirements cover every provider and the complete baseline metadata workflow:
 
 - **macOS** — this first release is supported and tested on macOS only.
 - **Python 3** — the launcher runs with `python3`.
 - **Internet access** — the tool fetches supported detail pages and any available local-metadata assets.
-- **yt-dlp, FFmpeg, and a supported YouTube JavaScript runtime** — required only for Crunchyroll's official-YouTube trailer fallback. Deno is used automatically by yt-dlp; installed Node, QuickJS, or Bun runtimes are enabled by the tool. Missing or ambiguous trailer results do not stop the metadata workflow.
 - **A supported public detail-page link** — use a page from one of the providers listed above, not a playback, manifest, or direct-stream URL.
 
 The project uses Python's standard library. No package installation is required for the documented baseline workflow.
+
+### Optional Crunchyroll YouTube-trailer requirements
+
+These are needed only when Crunchyroll supplies no direct trailer and the provider finds an exact official Crunchyroll YouTube fallback:
+
+- **yt-dlp** — retrieves the verified public trailer.
+- **FFmpeg** — merges the selected H.264 video and AAC audio into `trailers/trailer.mp4`.
+- **A yt-dlp-supported JavaScript runtime** — Deno is used automatically by yt-dlp; installed Node, QuickJS, or Bun runtimes are enabled by the tool.
+
+These optional programs are not checked at startup and are never invoked for another provider. If any one is missing, outdated, or unable to download the trailer, only that optional Crunchyroll trailer is skipped. Crunchyroll metadata, NFOs, artwork, renaming, subtitles, season organization, and all other providers continue normally.
 
 ## How to Run
 

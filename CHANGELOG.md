@@ -24,6 +24,8 @@ All notable project changes are documented here. Published entries are derived f
 ### Changed
 
 - Crunchyroll series folders now include provider-derived run years: `Series Title (Year)` for completed single-year runs, `Series Title (Start Year-End Year)` for completed multi-year runs, and `Series Title (Start Year-)` while currently airing, with legacy or stale year-qualified paths migrated atomically rather than nested.
+- Crunchyroll's `yt-dlp`, FFmpeg, and JavaScript-runtime trailer dependencies are explicitly optional and isolated from startup, baseline metadata handling, and every other provider; a missing trailer dependency skips only that optional trailer.
+- The README now links to the live-performance-specific companion tool and lists its currently documented providers.
 
 - Individual Crunchyroll watch-page handoffs now ensure a show-level `tvshow.nfo`, poster, backdrop, and logo beside the season folders before saving episode metadata; existing show metadata and artwork are preserved.
 - Crunchyroll subtitle organization now identifies full accessibility tracks with Jellyfin's `cc` flag, discards proven same-language forced signs/title-card tracks, and preserves ambiguous distinct tracks without filename collisions.
