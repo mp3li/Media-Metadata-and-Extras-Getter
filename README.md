@@ -31,6 +31,7 @@
 - [Importing mylinks.txt](#importing-mylinkstxt)
 - [Settings](#settings)
 - [BBC Series Mode](#bbc-series-mode)
+- [Paramount+ Series Mode](#paramount-series-mode)
 - [Crunchyroll Series Mode](#crunchyroll-series-mode)
 - [Media Matching](#media-matching)
 - [Output Structure and Naming](#output-structure-and-naming)
@@ -132,7 +133,11 @@ Coverage depends on what the provider exposes in the public page data for each i
 
 - show title, description, genre, year, season count, TV rating, brand, Paramount+ show ID, public episode URLs, and every public season/episode guide entry
 - episode title, season/episode number, synopsis, date, duration where Paramount+ exposes it, public episode ID, and available episode artwork
-- show portrait, wide hero artwork, social artwork, and title logo; for locally matched episodes, all artwork uses that exact video filename as its base, including the full-resolution episode `-thumb.jpg`. Paramount+ does not expose separate season-poster artwork for this show page
+- the exact `Paramount+ Provider` tag on every Paramount+ NFO, alongside the existing source/provider tags
+- show portrait as Jellyfin `poster`, wide hero artwork as `backdrop`, and title art as `logo` at the series root; each local episode receives its own full-resolution `-thumb` image
+- a playing-page URL resolves its public parent-show page and carries the complete show metadata into the save, so an episode is never written without `tvshow.nfo` and available series artwork beside its season folders
+- Jellyfin series folders named `Series Title (Year)` for a completed single-year run, `Series Title (Start Year-End Year)` for a completed multi-year run, or `Series Title (Start Year-)` while currently airing
+- one provider-supplied public preview, when available and confirmed clear, under Jellyfin's native `trailers/trailer.mp4` layout; Paramount+ never uses the Crunchyroll YouTube fallback
 - movie pages add feature-film synopsis, runtime, rating, genre, cast, movie ID, title/logo/hero/brand artwork, and their autoplaying public preview.
 - public clip pages add clip title, synopsis, duration, date, rating, full-resolution artwork, public manifest, and exposed caption status. A clear DASH or HLS manifest is saved only when it contains no DRM declaration; the provider uses ordinary `ffmpeg` remuxing without keys or DRM tooling.
 - the Korra preview currently advertises `CLOSED-CAPTIONS=NONE`; subscription feature/episode playback and any subtitle tracks behind it are not downloaded by this tool.
@@ -158,7 +163,7 @@ These requirements cover every provider and the complete baseline metadata workf
 - **macOS** — this first release is supported and tested on macOS only.
 - **Python 3** — the launcher runs with `python3`.
 - **Internet access** — the tool fetches supported detail pages and any available local-metadata assets.
-- **A supported public detail-page link** — use a page from one of the providers listed above, not a playback, manifest, or direct-stream URL.
+- **A supported public detail or watch-page link** — use one of the provider page types listed above, not a manifest or direct-stream URL.
 
 The project uses Python's standard library. No package installation is required for the documented baseline workflow.
 
@@ -171,6 +176,10 @@ These are needed only when Crunchyroll supplies no direct trailer and the provid
 - **A yt-dlp-supported JavaScript runtime** — Deno is used automatically by yt-dlp; installed Node, QuickJS, or Bun runtimes are enabled by the tool.
 
 These optional programs are not checked at startup and are never invoked for another provider. If any one is missing, outdated, or unable to download the trailer, only that optional Crunchyroll trailer is skipped. Crunchyroll metadata, NFOs, artwork, renaming, subtitles, season organization, and all other providers continue normally.
+
+### Optional Paramount+ preview requirement
+
+**FFmpeg** is used only when Paramount+ exposes a public, unencrypted HLS or DASH preview. If FFmpeg is absent, the preview times out, or the manifest declares encryption or content protection, only the optional trailer is skipped; metadata, artwork, naming, subtitle sidecars, season organization, and other providers continue normally.
 
 ## How to Run
 
@@ -314,21 +323,46 @@ Default:
 "rename_generic_video_filenames": false
 ```
 
-For a Paramount+ episode URL, a matching generic capture is renamed with the public episode placement. For example, the episode page for `Welcome to Republic City` changes `master_2026-07-24_23-29-44.mp4` to:
+For a Paramount+ episode URL, the one explicitly handed-off capture is renamed with the public episode placement. For example, the episode page for `Welcome to Republic City` changes `master_2026-07-24_23-29-44.mp4` to:
 
 ```text
 S01E01 The Legend of Korra - Welcome to Republic City.mp4
 ```
 
-Use an individual Paramount+ episode URL when naming a generic capture: a show link intentionally lists every episode and a timestamp-only filename does not identify which one was captured. The series guide is used to match episode files that actually exist in your local media folders; it does not create metadata or artwork for missing episodes.
+Use an individual Paramount+ playing-page URL when naming a generic capture: that link identifies the one completed episode and resolves its parent show automatically. A show link intentionally lists every episode, so a timestamp-only filename does not identify which one was captured. The series guide is used only to match episodes that actually exist locally; it does not create metadata or artwork for missing episodes.
 
-For a local Paramount+ episode, the tool matches common placement forms without requiring the show title: `S01E01`, `S1 E1`, `Season 1 Episode 1`, `Series 1 Episode 1`, `1x01`, and `01-01`. Every saved NFO and image uses that exact local video filename as its base: `Video.mkv`, `Video.nfo`, `Video-poster.jpg`, `Video-fanart.jpg`, `Video-banner.jpg`, `Video-landscape.jpg`, `Video-logo.png`, `Video-thumb.jpg`, and filename-based `extrafanart/` artwork. It leaves videos, subtitles, and existing folder names untouched. A timestamp-only `master_...` file remains intentionally unmatched by a show link; use that episode's individual Paramount+ URL when you want to rename it.
+### Paramount+ series mode
 
-```json
-"paramountplus_series_metadata_enabled": true
+Paramount+ series mode now produces the same Jellyfin layout and safety guarantees as Crunchyroll, using Paramount+'s own public metadata and preview media:
+
+```text
+Series Title (Start Year-)/
+  tvshow.nfo
+  poster.ext
+  backdrop.ext
+  logo.ext
+  trailers/
+    trailer.mp4
+  S01/
+    S01E01 Series Title - Episode Title.mkv
+    S01E01 Series Title - Episode Title.en_us.srt
+    S01E01 Series Title - Episode Title.nfo
+    S01E01 Series Title - Episode Title-thumb.jpg
 ```
 
-Set this to `false` to keep Paramount+ show pages in their ordinary single-page metadata mode.
+The playing-page handoff is the safest MediaFab/WidevineProxy2 route: pass that page URL and the exact newly completed media file when possible. The tool gives that one file the page's season and episode placement even when its temporary name is only `manifest_...`. Subtitle sidecars retain their complete existing suffix after the old video stem, so provider language labels such as `.en_us.srt` are preserved and distinct tracks are neither guessed nor deleted.
+
+For configured broad media roots, matching is stricter: the path must contain the show title and the file must use a recognized placement such as `S01E01`, `S1 E1`, `Season 1 Episode 1`, `Series 1 Episode 1`, `1x01`, or `01-01`. This prevents an unrelated show's `S01E01` from being claimed. Existing destinations are validated before a two-phase move, conflicts stop the operation, and an existing series root is reused instead of nested.
+
+```json
+"paramountplus_series_metadata_enabled": true,
+"paramountplus_series_rename_enabled": true,
+"paramountplus_series_organize_enabled": true
+```
+
+- `paramountplus_series_rename_enabled` renames the episode and its subtitle sidecars to the public `S01E01 Show Title - Episode Title` identity.
+- `paramountplus_series_organize_enabled` places them in the correct `S01`, `S02`, or later folder beneath the year-qualified series root.
+- Set either file-action setting to `false` to disable that action. Set `paramountplus_series_metadata_enabled` to `false` to use ordinary single-page output.
 
 ### Crunchyroll series settings
 
@@ -355,7 +389,8 @@ Paramount+ movie pages use a provider and movie-title folder, with the title and
 Output/Paramount+/Avatar Aang - The Last Airbender (2026)/
   Avatar Aang - The Last Airbender (2026).nfo
   Avatar Aang - The Last Airbender (2026)-poster.jpg
-  Extras/
+  trailers/
+    trailer.mp4
 ```
 
 When media matching finds a Paramount+ movie, the matching video and directly matching subtitle sidecars are moved into that same folder and renamed to `Movie Title (Year)`. The destination is checked first, so an existing file is never replaced. If no local video matches, only the downloaded metadata bundle is saved there.
@@ -526,7 +561,7 @@ When media matching finds a local video, the real filename replaces `<title>` in
 
 ## Metadata Written to the NFO
 
-The generated NFO has a `<movie>` root for films/one-off programmes, a `<tvshow>` root for Crunchyroll series pages, or an `<episodedetails>` root for matched episodes, and can include:
+The generated NFO has a `<movie>` root for films/one-off programmes, a `<tvshow>` root for Paramount+ and Crunchyroll series pages, or an `<episodedetails>` root for matched episodes, and can include:
 
 - title, original title, sort title, outline, plot, tagline, year, and date
 - runtime, rating, content rating, and language
@@ -571,6 +606,7 @@ Provider Scripts/
 
 Tests/
   test_crunchyroll.py
+  test_paramountplus.py
 
 Settings/
   settings-default.json

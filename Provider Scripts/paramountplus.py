@@ -9,6 +9,7 @@ import re
 import subprocess
 import urllib.parse
 import urllib.request
+from datetime import date, timedelta
 from typing import Any
 
 
@@ -25,6 +26,7 @@ USER_AGENT = (
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
     "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/137.0.0.0 Safari/537.36"
 )
+CURRENT_SERIES_WINDOW_DAYS = 45
 
 
 def is_supported_url(url: str) -> bool:
@@ -42,7 +44,7 @@ def extract_metadata(url: str, timeout: int = 25) -> dict[str, Any]:
         return movie_metadata_from_page(page, normalized)
     if "/shows/video/" in path or "/movies/trailer/video/" in path:
         try:
-            return episode_metadata_from_page(page, normalized)
+            return episode_metadata_from_page(page, normalized, timeout=timeout)
         except ValueError:
             return clip_metadata_from_page(page, normalized)
     if "/shows/" not in path:
@@ -90,7 +92,7 @@ def movie_metadata_from_page(page: str, source_url: str) -> dict[str, Any]:
         "trailer_url": preview_url,
         "production_label": "Provider",
         "genres": [clean_text(data.get("genre"))],
-        "tags": [NAME, f"Provider: {NAME}"],
+        "tags": provider_tags(),
         "studios": ["Paramount Pictures", STUDIO_NAME],
         "actors": [{"name": name, "role": ""} for name in cast_text.split(",") if clean_text(name)],
         "unique_ids": {"paramountplus": movie_id} if movie_id else {},
@@ -131,7 +133,7 @@ def clip_metadata_from_page(page: str, source_url: str) -> dict[str, Any]:
         "poster_url": image,
         "fanart_url": image,
         "production_label": "Provider",
-        "tags": [NAME, f"Provider: {NAME}", "Public Clip"],
+        "tags": provider_tags(["Public Clip"]),
         "studios": [STUDIO_NAME],
         "unique_ids": {"paramountplus": clip_id} if clip_id else {},
         "extra_fields": fields,
@@ -195,6 +197,7 @@ def show_metadata_from_page(page: str, source_url: str, timeout: int) -> dict[st
             continue
         episode_records.extend(parse_episode_cards(season_page, source_url))
     episode_records = dedupe_records(episode_records)
+    start_year, end_year, is_current = series_run_years(values.get("Year", ""), episode_records)
     fields: dict[str, list[str]] = {}
     add_field(fields, "Paramount+ show ID", show_id)
     add_field(fields, "Brand", values.get("Brand", ""))
@@ -222,10 +225,15 @@ def show_metadata_from_page(page: str, source_url: str, timeout: int) -> dict[st
     return {
         "source_url": source_url,
         "source_site": NAME,
+        "media_kind": "series",
         "title": title,
+        "show_title": title,
         "outline": description,
         "plot": description,
-        "year": values.get("Year", ""),
+        "year": start_year,
+        "series_start_year": start_year,
+        "series_end_year": end_year,
+        "series_is_current": is_current,
         "content_rating": values.get("Rating", ""),
         "poster_url": portrait or social,
         "fanart_url": landscape or social,
@@ -233,7 +241,7 @@ def show_metadata_from_page(page: str, source_url: str, timeout: int) -> dict[st
         "trailer_url": preview_url,
         "production_label": "Provider",
         "genres": [values.get("Genre", "")],
-        "tags": [NAME, f"Provider: {NAME}"],
+        "tags": provider_tags(),
         "studios": [values.get("Brand", ""), STUDIO_NAME],
         "unique_ids": {"paramountplus": show_id} if show_id else {},
         "extra_fields": fields,
@@ -247,44 +255,82 @@ def show_metadata_from_page(page: str, source_url: str, timeout: int) -> dict[st
     }
 
 
-def episode_metadata_from_page(page: str, source_url: str) -> dict[str, Any]:
-    record = next(iter(parse_episode_cards(page, source_url)), {})
+def episode_metadata_from_page(page: str, source_url: str, timeout: int = 25) -> dict[str, Any]:
+    episode_id = first_match(urllib.parse.urlparse(source_url).path, r"/shows/video/([^/]+)/")
+    record = jsonld_episode(page, source_url)
+    if not record:
+        cards = parse_episode_cards(page, source_url)
+        record = next((item for item in cards if clean_text(item.get("id")) == episode_id), {})
+        record = record or next(iter(cards), {})
     title_text = clean_text(re.sub(r"\s*\|\s*Paramount\+.*$", "", meta_content(page, "og:title")))
     show_title, season_number = split_episode_heading(title_text)
     if not record:
-        record = jsonld_episode(page, source_url)
-    if not record:
         raise ValueError("Paramount+ episode page did not expose episode metadata.")
+    if episode_id:
+        record["id"] = episode_id
+    show_url = series_url_from_episode_page(page, source_url)
+    series_metadata: dict[str, Any] = {}
+    if show_url:
+        try:
+            series_metadata = show_metadata_from_page(fetch_text(show_url, timeout=timeout), show_url, timeout=timeout)
+        except Exception:
+            series_metadata = {}
+    resolved_show_title = first_non_empty(
+        clean_text(series_metadata.get("title")),
+        show_title,
+        clean_text(record.get("show_title")),
+        clean_text(jsonld_of_type(page, "TVEpisode").get("partOfSeries", {}).get("name")),
+    )
+    series_fields = series_metadata.get("extra_fields", {}) if isinstance(series_metadata.get("extra_fields"), dict) else {}
     fields: dict[str, list[str]] = {}
     add_field(fields, "Paramount+ episode ID", record.get("id", ""))
     add_field(fields, "Episode page", record.get("url", source_url))
+    add_field(fields, "Paramount+ show ID", first_value(series_fields.get("Paramount+ show ID")))
+    add_field(fields, "Brand", first_value(series_fields.get("Brand")))
+    add_field(fields, "Season count", first_value(series_fields.get("Season count")))
     return {
         "source_url": source_url,
         "source_site": NAME,
         "media_kind": "episode",
-        "title": show_title or record.get("show_title", ""),
-        "show_title": show_title or record.get("show_title", ""),
+        "title": resolved_show_title,
+        "show_title": resolved_show_title,
         "season_number": str(record.get("season", season_number or "")),
         "episode_number": str(record.get("episode", "")),
         "episode_title": record.get("title", ""),
         "outline": record.get("description", ""),
         "plot": record.get("description", ""),
+        "year": iso_date(record.get("date", ""))[:4],
+        "series_start_year": clean_text(series_metadata.get("series_start_year")),
+        "series_end_year": clean_text(series_metadata.get("series_end_year")),
+        "series_is_current": bool(series_metadata.get("series_is_current")),
         "date": record.get("date", ""),
         "runtime_minutes": duration_minutes(record.get("duration", "")),
-        "poster_url": record.get("image", ""),
-        "fanart_url": record.get("image", ""),
+        "content_rating": clean_text(series_metadata.get("content_rating")),
+        "poster_url": clean_text(series_metadata.get("poster_url")),
+        "fanart_url": clean_text(series_metadata.get("fanart_url")),
+        "logo_url": clean_text(series_metadata.get("logo_url")),
+        "trailer_url": clean_text(series_metadata.get("trailer_url")),
+        "thumb_url": record.get("image", ""),
         "production_label": "Provider",
-        "tags": [NAME, f"Provider: {NAME}"],
-        "studios": [STUDIO_NAME],
+        "genres": list(series_metadata.get("genres", [])),
+        "tags": provider_tags(),
+        "studios": list(series_metadata.get("studios", [])) or [STUDIO_NAME],
         "unique_ids": {"paramountplus": record.get("id", "")} if record.get("id") else {},
         "extra_fields": fields,
-        "folder_name_override": record.get("show_title", ""),
+        "series_episodes": [record],
+        "series_metadata": series_metadata,
+        "folder_name_override": resolved_show_title,
     }
 
 
 def parse_episode_cards(page: str, show_url: str) -> list[dict[str, Any]]:
     records: list[dict[str, Any]] = []
-    for article in re.findall(r'<article class="grid-view-item">(.*?)</article>', page, re.S):
+    for article_match in re.finditer(
+        r'(<article[^>]*class=["\'][^"\']*\bgrid-view-item\b[^"\']*["\'][^>]*>)(.*?)</article>',
+        page,
+        re.S | re.I,
+    ):
+        article = article_match.group(1) + article_match.group(2)
         link = first_match(article, r'href="([^"]*/shows/video/[^"]+/)"')
         tracking = first_match(article, r'data-tracking="([^"]+)"')
         match = re.search(r"\|S(\d+)\|Ep(\d+)\|([^|]*)\|([^|]*)\|\|", html.unescape(tracking))
@@ -352,8 +398,11 @@ def jsonld_episode(page: str, source_url: str) -> dict[str, Any]:
         if data.get("@type") != "TVEpisode":
             continue
         return {
-            "id": first_match(data.get("url", ""), r"/video/([^/]+)/"),
-            "url": urllib.parse.urljoin(source_url, data.get("url", "")),
+            "id": first_non_empty(
+                first_match(clean_text(data.get("url")), r"/video/([^/]+)/"),
+                first_match(urllib.parse.urlparse(source_url).path, r"/shows/video/([^/]+)/"),
+            ),
+            "url": source_url,
             "show_title": clean_text(data.get("partOfSeries", {}).get("name")),
             "season": int(data.get("partOfSeason", {}).get("seasonNumber") or 0),
             "episode": int(data.get("episodeNumber") or 0),
@@ -364,6 +413,54 @@ def jsonld_episode(page: str, source_url: str) -> dict[str, Any]:
             "image": clean_text(data.get("image")),
         }
     return {}
+
+
+def series_url_from_episode_page(page: str, source_url: str) -> str:
+    """Resolve a stable parent-show page from a Paramount+ playing page."""
+    candidates = [
+        first_match(page, r'player\.baseUrl\s*=\s*["\']([^"\']+)["\']'),
+        first_match(page, r'<a[^>]+href=["\'](/shows/[^/"\']+/)["\'][^>]*aa-link=["\']show header'),
+    ]
+    show_key = first_match(page, r'CBS\.Registry\.Show\s*=\s*\{.*?["\']key["\']\s*:\s*["\']([^"\']+)')
+    if show_key:
+        candidates.append(f"/shows/{show_key}/")
+    for value in candidates:
+        if not value:
+            continue
+        url = urllib.parse.urljoin(source_url, html.unescape(value))
+        path = urllib.parse.urlparse(url).path
+        match = re.match(r"^/shows/([^/]+)/", path, re.IGNORECASE)
+        if match and match.group(1).casefold() != "video":
+            return urllib.parse.urljoin(source_url, f"/shows/{match.group(1)}/")
+    return ""
+
+
+def series_run_years(
+    launch_year: Any,
+    episodes: list[dict[str, Any]],
+    current_date: date | None = None,
+) -> tuple[str, str, bool]:
+    start = clean_text(launch_year)
+    dates: list[date] = []
+    for episode in episodes:
+        value = clean_text(episode.get("date"))
+        try:
+            dates.append(date.fromisoformat(value))
+        except ValueError:
+            continue
+    if not start and dates:
+        start = str(min(dates).year)
+    if not start.isdigit():
+        return "", "", False
+    latest = max(dates, default=None)
+    end = str(latest.year) if latest else start
+    today = current_date or date.today()
+    current = bool(latest and latest >= today - timedelta(days=CURRENT_SERIES_WINDOW_DAYS))
+    return start, end, current
+
+
+def provider_tags(additional: list[str] | None = None) -> list[str]:
+    return dedupe([NAME, f"Provider: {NAME}", "Paramount+ Provider", *(additional or [])])
 
 
 def jsonld_of_type(page: str, wanted_type: str) -> dict[str, Any]:
@@ -478,6 +575,12 @@ def first_match(text: str, pattern: str) -> str:
 
 def first_non_empty(*values: str) -> str:
     return next((clean_text(value) for value in values if clean_text(value)), "")
+
+
+def first_value(value: Any) -> str:
+    if isinstance(value, (list, tuple)):
+        return clean_text(value[0]) if value else ""
+    return clean_text(value)
 
 
 def clean_text(value: Any) -> str:

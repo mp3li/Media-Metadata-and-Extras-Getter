@@ -20,6 +20,7 @@ All notable project changes are documented here. Published entries are derived f
 - Public, unencrypted Paramount+ autoplay-preview download support through standard `ffmpeg` remuxing only; no keys, DRM tooling, or protected playback support.
 - User-designated related-world public teaser attachment for *Avatar Aang: The Last Airbender*, while preserving the teaser's own *Avatar: Seven Havens* identity and metadata.
 - Paramount+ source and provider tags in generated NFO metadata.
+- Crunchyroll-parity Paramount+ episode handoffs that resolve the parent show, save a complete series-root bundle, preserve episode thumbnails, and add the exact `Paramount+ Provider` tag.
 
 ### Changed
 
@@ -37,6 +38,8 @@ All notable project changes are documented here. Published entries are derived f
 - Generic `master_YYYY-MM-DD_HH-MM-SS` captures can be renamed alongside matching subtitle sidecars when generic renaming is enabled and a specific Paramount+ episode link provides an unambiguous title and placement.
 - Paramount+ show guides now match only existing local videos with a supported season/episode placement and save every NFO and image with that exact video filename as its base; missing episodes are never saved.
 - Added the enabled-by-default `paramountplus_series_metadata_enabled` setting for that local-series workflow.
+- Paramount+ series mode now safely renames explicit episode handoffs and their subtitle sidecars, organizes seasons beneath year-qualified series roots, refuses collisions, rejects ambiguous broad-root matches, and writes only locally present episodes.
+- Paramount+ public previews now use Jellyfin's native `trailers/trailer.mp4` location and remain optional and non-fatal when FFmpeg is missing or a preview cannot be safely remuxed.
 - Paramount+ movies now save in `Output/Paramount+/Movie Title (Year)/`; a matched local movie and directly matching subtitles are safely moved there and renamed to `Movie Title (Year)` after destination collision checks.
 - README coverage, provider badge, and media-matching documentation now include Paramount+.
 
