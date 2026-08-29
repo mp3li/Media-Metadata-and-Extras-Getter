@@ -1,4 +1,4 @@
-<h1 align="center">Media Metadata and Extras Getter by mp3li</h1>
+<h1 align="center">Media Metadata and Extras Getter</h1>
 
 <p align="center">
   A macOS Python tool that turns supported public film and video detail pages into local metadata bundles, prepared for Jellyfin while remaining useful for any media-library workflow that uses standard NFO files and local artwork.
@@ -45,11 +45,11 @@
 
 ## About the Project
 
-Media Metadata and Extras Getter by mp3li is for regular video media—not specifically for live performances.
+Media Metadata and Extras Getter is a macOS Python tool that collects public metadata, artwork, trailers, and other extras for supported movies, television series, episodes, programmes, and clips, then saves them as Jellyfin-friendly local metadata bundles.
 
-For a version of this tool specifically made for live performances, including Amazon Prime Video, OperaVision, Metropolitan Opera, BroadwayHD, MarqueeTV, PBS Great Performances, Disney+, and Netflix, check out [Live Performance Metadata and Extras Getter by mp3li](https://github.com/mp3li/Live-Performance-Metadata-and-Extras-Getter).
+For a version of this tool specifically made for live performances, including Amazon Prime Video, OperaVision, Metropolitan Opera, BroadwayHD, MarqueeTV, PBS Great Performances, Disney+, and Netflix, check out [Live Performance Metadata and Extras Getter](https://github.com/mp3li/Live-Performance-Metadata-and-Extras-Getter).
 
-It gathers information that supported public detail pages expose and saves it as a local metadata bundle: an NFO file plus available artwork, trailers, gallery images, and extra videos.
+Media Metadata and Extras Getter gathers information that supported public detail pages expose and saves it as a local metadata bundle: an NFO file plus available artwork, trailers, gallery images, and extra videos. It currently supports public detail pages from Amazon Prime Video, Netflix, Disney+, BBC iPlayer, Paramount+, and Crunchyroll.
 
 The filenames and folder layout are designed to work especially well with Jellyfin's local-metadata conventions. The output is not locked to Jellyfin, though: the files stay local, use a standard XML NFO structure, and can also support your own organized media folders or other software that reads local NFO files and artwork.
 
@@ -61,6 +61,10 @@ The practical workflow is simple:
 - let the real video filename anchor sidecar names when media matching is enabled
 
 It is intended for supported provider detail pages. It is not a video downloader, it does not accept manifest or stream URLs, and it does not scrape arbitrary sites.
+
+The tags and metadata written by this tool can also become the foundation of a Jellyfin workflow using multiple plugins also made by mp3li. [Media Tagging Manager Jellyfin Plugin](https://github.com/mp3li/Media-Tagging-Manager-Jellyfin-Plugin) expands each title with provider, network, genre, keyword, people, rating, language, and other useful metadata while preserving tags supplied by local NFO files. [Collection Manager Jellyfin Plugin](https://github.com/mp3li/Collection-Manager-Jellyfin-Plugin) uses that metadata to create and automatically maintain native Jellyfin collections. [Home Screen Manager Jellyfin Plugin](https://github.com/mp3li/Home-Screen-Sections-Manager-Jellyfin-Plugin) uses those tags, Crunchyroll ratings, collections, libraries, and viewing activity to build custom home-screen sections, ranked rows, and discovery pages. Used together, metadata gathered here can travel from local NFO files into Jellyfin, become organized collections, and ultimately shape how the library is browsed, while every plugin also remains useful on its own.
+
+This tool can also serve as the metadata stage of [MediaFab](https://github.com/mp3li/WidevineProxy2-With-Extras)'s workflow. After MediaFab completes its tasks, it can pass the finished media and provider detail link to this tool for matching, naming, season organization, NFO creation, artwork, trailers, and other available extras. [Live Performance Metadata and Extras Getter](https://github.com/mp3li/Live-Performance-Metadata-and-Extras-Getter) supports the same optional MediaFab handoff for live-performance providers, allowing MediaFab to route general media and live performances to the appropriate metadata tool.
 
 ## What the Tool Does
 
