@@ -8,7 +8,7 @@
   <img alt="Status" src="https://img.shields.io/badge/Status-In_Active_Development-660000?style=flat-square&labelColor=04040c" />
   <img alt="Interface" src="https://img.shields.io/badge/Interface-Terminal-660000?style=flat-square&labelColor=04040c" />
   <img alt="Metadata" src="https://img.shields.io/badge/Metadata-Jellyfin_Style_NFO-660000?style=flat-square&labelColor=04040c" />
-  <img alt="Providers" src="https://img.shields.io/badge/Providers-Amazon%2C_Netflix%2C_Disney%2B%2C_BBC%2C_Paramount%2B_%26_Crunchyroll-660000?style=flat-square&labelColor=04040c" />
+  <img alt="Providers" src="https://img.shields.io/badge/Providers-Amazon%2C_Netflix%2C_Disney%2B%2C_BBC%2C_Paramount%2B%2C_Crunchyroll_%26_PBS_KIDS-660000?style=flat-square&labelColor=04040c" />
   <img alt="Downloads" src="https://img.shields.io/badge/Downloads-Artwork%2C_Trailers_%26_Metadata-660000?style=flat-square&labelColor=04040c" />
   <img alt="Bulk Processing" src="https://img.shields.io/badge/Bulk_Processing-Optional-660000?style=flat-square&labelColor=04040c" />
   <img alt="Platform" src="https://img.shields.io/badge/Platform-macOS-660000?style=flat-square&labelColor=04040c" />
@@ -34,6 +34,7 @@
 - [Disney+ Series Mode](#disney-series-mode)
 - [Paramount+ Series Mode](#paramount-series-mode)
 - [Crunchyroll Series Mode](#crunchyroll-series-mode)
+- [PBS KIDS Series Mode](#pbs-kids-series-mode)
 - [Media Matching](#media-matching)
 - [Output Structure and Naming](#output-structure-and-naming)
 - [Metadata Written to the NFO](#metadata-written-to-the-nfo)
@@ -51,7 +52,7 @@ Media Metadata and Extras Getter is a macOS Python tool that collects public met
 
 For a version of this tool specifically made for live performances, including Amazon Prime Video, OperaVision, Metropolitan Opera, BroadwayHD, MarqueeTV, PBS Great Performances, Disney+, and Netflix, check out [Live Performance Metadata and Extras Getter](https://github.com/mp3li/Live-Performance-Metadata-and-Extras-Getter).
 
-Media Metadata and Extras Getter gathers information that supported public detail pages expose and saves it as a local metadata bundle: an NFO file plus available artwork, trailers, gallery images, and extra videos. It currently supports public detail pages from Amazon Prime Video, Netflix, Disney+, BBC iPlayer, Paramount+, and Crunchyroll.
+Media Metadata and Extras Getter gathers information that supported public detail pages expose and saves it as a local metadata bundle: an NFO file plus available artwork, trailers, gallery images, and extra videos. It currently supports public detail pages from Amazon Prime Video, Netflix, Disney+, BBC iPlayer, Paramount+, Crunchyroll, and PBS KIDS.
 
 The filenames and folder layout are designed to work especially well with Jellyfin's local-metadata conventions. The output is not locked to Jellyfin, though: the files stay local, use a standard XML NFO structure, and can also support your own organized media folders or other software that reads local NFO files and artwork.
 
@@ -90,6 +91,7 @@ The current provider scripts support these public detail-page links:
 - BBC iPlayer episode pages, including episodes in a series and one-off programmes such as films or plays
 - Paramount+ show, season, episode, movie, and public clip pages
 - Crunchyroll series and episode/watch pages
+- PBS KIDS series, full-episode playlist, and episode watch pages
 
 Unsupported providers do not fall back to generic scraping. The tool prints:
 
@@ -158,6 +160,17 @@ Coverage depends on what the provider exposes in the public page data for each i
 - Jellyfin series folders named `Series Title (Year)` for a completed single-year run, `Series Title (Start Year-End Year)` for a completed multi-year run, or `Series Title (Start Year-)` while episodes are currently airing
 - every public guide entry is used only as a lookup table; detailed episode metadata, NFOs, and thumbnails are fetched and saved only for episodes that actually exist in the configured local folders
 - Crunchyroll subscription video is not downloaded. This provider retrieves public catalog metadata and artwork only.
+
+### PBS KIDS
+
+- series name and series description
+- episode name, season and episode placement, video type, short description as Jellyfin `outline`, full description as Jellyfin `plot`, runtime, and premiere date
+- PBS KIDS video ID and legacy PBS media ID in both Jellyfin unique IDs and clearly named custom fields
+- the exact `PBS KIDS Provider` tag on every PBS KIDS series and episode NFO
+- the series transparent logo as Jellyfin `logo.png`, the provider's series card artwork as Jellyfin `thumb`, and each episode image as its matching `-thumb`
+- a series, full-episode playlist, or episode watch URL resolves the same currently available full-episode guide; an episode watch URL also identifies the exact completed episode and carries its parent series metadata into the save
+- local-only episode matching, safe media/subtitle renaming, season organization, collision refusal, and no-double-nesting behavior consistent with the Crunchyroll, Paramount+, and Disney+ series workflows
+- PBS KIDS video is not downloaded. This provider retrieves the requested public catalog metadata and artwork only.
 
 ## Requirements
 
@@ -417,6 +430,21 @@ An individual Crunchyroll watch link also carries its linked main-series metadat
 - Both operations validate every destination before a two-phase rename, so an existing conflicting file is never replaced.
 - Set either file-action setting to `false` if you want metadata without that action. Set `crunchyroll_series_metadata_enabled` to `false` to use normal single-page output instead.
 
+### PBS KIDS series settings
+
+PBS KIDS series processing is enabled by default. All three supported PBS KIDS URL forms resolve the currently available full-episode guide, while NFO files and episode thumbnails are written only for episodes matched to local media.
+
+```json
+"pbs_kids_series_metadata_enabled": true,
+"pbs_kids_series_rename_enabled": true,
+"pbs_kids_series_organize_enabled": true
+```
+
+- `pbs_kids_series_rename_enabled` renames matched episodes and their existing subtitle sidecars to `S07E17 Show Title - Episode Title`.
+- `pbs_kids_series_organize_enabled` places those files beneath the series root in `S01`, `S02`, and later season folders.
+- Every destination is checked before a two-phase rename or move, so an existing file is never overwritten.
+- Set either file-action setting to `false` to disable that action. Set `pbs_kids_series_metadata_enabled` to `false` to use ordinary single-page output.
+
 ### Paramount+ movie folders
 
 Paramount+ movie pages use a provider and movie-title folder, with the title and year as the filename base:
@@ -564,6 +592,28 @@ The episode vote tag and series breakdown tags are adjacent and ordered exactly 
 
 These are live values and can change between runs; the tag names and ordering remain fixed.
 
+## PBS KIDS Series Mode
+
+You can provide a PBS KIDS series page, a full-episode playlist page, or an individual episode watch page. Each form resolves the same currently available full-episode guide. The guide is only a lookup table: the tool writes episode metadata and artwork only for episodes that exist in the supplied local location.
+
+An individual watch-page handoff is the safest route for one newly completed generic file because it identifies the exact episode. A Queue Mode folder can match multiple episodes when each filename contains an episode title, PBS KIDS video ID, legacy PBS media ID, or season/episode placement. Multiple anonymous timestamp-only files are deliberately left untouched because the provider cannot safely determine which episode belongs to which file.
+
+The resulting Jellyfin layout is:
+
+```text
+Wild Kratts/
+  tvshow.nfo
+  thumb.jpg
+  logo.png
+  S07/
+    S07E17 Wild Kratts - Duck, Duck, Loon!.mkv
+    S07E17 Wild Kratts - Duck, Duck, Loon!.en.srt
+    S07E17 Wild Kratts - Duck, Duck, Loon!.nfo
+    S07E17 Wild Kratts - Duck, Duck, Loon!-thumb.png
+```
+
+The series NFO contains the series name and description. Episode NFOs use `<episodedetails>` and contain the episode name, placement, video type, short `outline`, longer `plot`, runtime, premiere date, PBS KIDS video ID, and legacy PBS media ID. The artwork bundle contains only the requested provider images: series card art as `thumb`, the transparent series logo as `logo.png`, and the episode image as its matching `-thumb`.
+
 ## Media Matching
 
 Media matching is optional and off by default. With it enabled, the tool searches the folders in `media_folders` for video files whose filename or parent folder resembles the scraped title. It supports common video extensions including `.mkv`, `.mp4`, `.m4v`, `.avi`, `.mov`, `.wmv`, `.ts`, `.m2ts`, `.webm`, and `.flv`.
@@ -597,7 +647,7 @@ When media matching finds a local video, the real filename replaces `<title>` in
 
 ## Metadata Written to the NFO
 
-The generated NFO has a `<movie>` root for films/one-off programmes, a `<tvshow>` root for Disney+, Paramount+, and Crunchyroll series pages, or an `<episodedetails>` root for matched episodes, and can include:
+The generated NFO has a `<movie>` root for films/one-off programmes, a `<tvshow>` root for Disney+, Paramount+, Crunchyroll, and PBS KIDS series pages, or an `<episodedetails>` root for matched episodes, and can include:
 
 - title, original title, sort title, outline, plot, tagline, year, and date
 - runtime, rating, content rating, and language
@@ -639,11 +689,13 @@ Provider Scripts/
   disneyplus.py
   netflix.py
   paramountplus.py
+  pbs_kids.py
 
 Tests/
   test_crunchyroll.py
   test_disneyplus.py
   test_paramountplus.py
+  test_pbs_kids.py
 
 Settings/
   settings-default.json

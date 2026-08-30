@@ -6,6 +6,11 @@ All notable project changes are documented here. Published entries are derived f
 
 ### Added
 
+- PBS KIDS provider for public series, full-episode playlist, and episode watch pages, with current full-episode guide resolution from all three URL forms.
+- Requested PBS KIDS series and episode metadata: names, season/episode placement, type, separate short and full descriptions, runtime, premiere date, PBS KIDS video ID, legacy PBS media ID, and the exact `PBS KIDS Provider` tag.
+- PBS KIDS series transparent logos as Jellyfin `logo.png`, series card artwork as `thumb`, and matching episode images as `-thumb` artwork.
+- Local-only PBS KIDS Queue Mode matching with safe episode/subtitle renaming, season folders, parent-series bundles, collision refusal, and exact watch-page handoffs for generic completed filenames.
+
 - Crunchyroll provider for public series and episode/watch pages using Crunchyroll's anonymous public catalog metadata.
 - Crunchyroll portrait poster, wide backdrop, transparent title logo, and smaller episode-thumbnail saving with Jellyfin-standard artwork names.
 - Ordered Jellyfin tags for episode upvotes/downvotes and the exact series average, rating total, and five-to-one-star distribution.

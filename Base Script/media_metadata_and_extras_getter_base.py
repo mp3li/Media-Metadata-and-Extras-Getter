@@ -184,6 +184,15 @@ class DisneyPlusMediaGroup:
 
 
 @dataclass
+class PBSKidsMediaGroup:
+    folder: Path
+    stem: str
+    season: int
+    episode: int
+    files: list[Path] = field(default_factory=list)
+
+
+@dataclass
 class ParamountPlusMediaGroup:
     folder: Path
     stem: str
@@ -275,6 +284,7 @@ def load_provider_script(module_name: str):
 amazon = load_provider_script("amazon")
 netflix = load_provider_script("netflix")
 disneyplus = load_provider_script("disneyplus")
+pbs_kids = load_provider_script("pbs_kids")
 bbc_iplayer = load_provider_script("bbc_iplayer")
 paramountplus = load_provider_script("paramountplus")
 crunchyroll = load_provider_script("crunchyroll")
@@ -283,6 +293,7 @@ PROVIDER_HANDLERS = [
     ("amazon", amazon.NAME, amazon.is_supported_url),
     ("netflix", netflix.NAME, netflix.is_supported_url),
     ("disneyplus", disneyplus.NAME, disneyplus.is_supported_url),
+    ("pbs_kids", pbs_kids.NAME, pbs_kids.is_supported_url),
     ("bbc_iplayer", bbc_iplayer.NAME, bbc_iplayer.is_supported_url),
     ("paramountplus", paramountplus.NAME, paramountplus.is_supported_url),
     ("crunchyroll", crunchyroll.NAME, crunchyroll.is_supported_url),
@@ -389,6 +400,8 @@ def scrape_url(url: str) -> Metadata:
         return metadata_from_provider_dict(netflix.extract_metadata(normalized), detail_link=url)
     if provider == "disneyplus":
         return metadata_from_disneyplus(normalized, detail_link=url)
+    if provider == "pbs_kids":
+        return metadata_from_provider_dict(pbs_kids.extract_metadata(normalized), detail_link=url)
     if provider == "bbc_iplayer":
         return metadata_from_provider_dict(bbc_iplayer.extract_metadata(normalized), detail_link=url)
     if provider == "paramountplus":
@@ -457,7 +470,7 @@ def clean_final_metadata(meta: Metadata) -> None:
 
 
 def format_preview(meta: Metadata) -> str:
-    jellyfin_named_art = meta.source_site in {crunchyroll.NAME, disneyplus.NAME, paramountplus.NAME}
+    jellyfin_named_art = meta.source_site in {crunchyroll.NAME, disneyplus.NAME, paramountplus.NAME, pbs_kids.NAME}
     rows = [
         ("Source Site", meta.source_site),
         ("Detail Link Given", meta.detail_link),
@@ -1814,6 +1827,279 @@ def save_disneyplus_series_metadata(
     return saved
 
 
+def pbs_kids_series_enabled(
+    meta: Metadata, settings: dict[str, Any], explicit_folder: str = ""
+) -> bool:
+    return (
+        meta.source_site == pbs_kids.NAME
+        and meta.media_kind.casefold() in {"series", "episode"}
+        and bool(meta.series_episodes)
+        and bool(settings.get("pbs_kids_series_metadata_enabled", True))
+        and bool(explicit_folder or media_search_roots(settings))
+    )
+
+
+def pbs_kids_match_record(video: Path, records: list[dict[str, Any]]) -> dict[str, Any] | None:
+    position = paramountplus_episode_position(f"{video.stem} {video.parent.name}")
+    if position:
+        positional = [
+            record for record in records
+            if clean_text(record.get("season")).isdigit()
+            and clean_text(record.get("episode")).isdigit()
+            and (int(record["season"]), int(record["episode"])) == position
+        ]
+        if len(positional) == 1:
+            return positional[0]
+    stem_key = normalize_match_key(video.stem)
+    identity_matches = []
+    for record in records:
+        identities = [
+            clean_text(record.get("id")),
+            clean_text(record.get("legacy_id")),
+            normalize_match_key(clean_text(record.get("guid"))),
+        ]
+        if any(identity and normalize_match_key(identity) in stem_key for identity in identities):
+            identity_matches.append(record)
+    if len(identity_matches) == 1:
+        return identity_matches[0]
+    title_matches = []
+    for record in records:
+        title_key = normalize_match_key(clean_text(record.get("title")))
+        if len(title_key) >= 4 and title_key in stem_key:
+            title_matches.append(record)
+    return title_matches[0] if len(title_matches) == 1 else None
+
+
+def pbs_kids_media_groups(
+    meta: Metadata, settings: dict[str, Any], explicit_folder: str = ""
+) -> list[tuple[PBSKidsMediaGroup, dict[str, Any]]]:
+    records = [record for record in meta.series_episodes if isinstance(record, dict)]
+    roots = [Path(explicit_folder).expanduser().resolve()] if explicit_folder else media_search_roots(settings)
+    candidates: list[Path] = []
+    for root in roots:
+        if not root.exists():
+            continue
+        if root.is_file() and root.suffix.casefold() in VIDEO_EXTENSIONS:
+            candidates.append(root)
+            continue
+        for folder_text, _dirs, filenames in os.walk(root):
+            candidates.extend(
+                Path(folder_text) / filename
+                for filename in filenames
+                if Path(filename).suffix.casefold() in VIDEO_EXTENSIONS
+            )
+    direct_record = None
+    if meta.media_kind.casefold() == "episode":
+        direct_record = next(
+            (
+                record for record in records
+                if clean_text(record.get("season")) == meta.season_number
+                and clean_text(record.get("episode")) == meta.episode_number
+            ),
+            None,
+        )
+    wanted_title = normalize_match_key(meta.show_title or meta.title)
+    matched: list[tuple[PBSKidsMediaGroup, dict[str, Any]]] = []
+    for video in sorted(set(candidates)):
+        if not explicit_folder and wanted_title not in normalize_match_key(str(video)):
+            continue
+        record = direct_record if explicit_folder and len(candidates) == 1 and direct_record else pbs_kids_match_record(video, records)
+        season = clean_text(record.get("season")) if record else ""
+        episode = clean_text(record.get("episode")) if record else ""
+        if not (record and season.isdigit() and episode.isdigit()):
+            continue
+        files = [video]
+        for sidecar in video.parent.iterdir():
+            if (
+                sidecar.is_file()
+                and sidecar.suffix.casefold() in {".srt", ".vtt", ".ass", ".ssa", ".sub"}
+                and (sidecar.stem == video.stem or sidecar.name.startswith(video.stem + "."))
+            ):
+                files.append(sidecar)
+        matched.append(
+            (
+                PBSKidsMediaGroup(video.parent, video.stem, int(season), int(episode), files),
+                record,
+            )
+        )
+    return sorted(matched, key=lambda item: (item[0].season, item[0].episode, str(item[0].folder)))
+
+
+def pbs_kids_target_base(meta: Metadata, group: PBSKidsMediaGroup | None = None) -> str:
+    season = group.season if group else int(meta.season_number or 1)
+    episode = group.episode if group else int(meta.episode_number or 0)
+    base = f"S{season:02d}E{episode:02d} {meta.show_title or meta.title}"
+    if meta.episode_title:
+        base += f" - {meta.episode_title}"
+    return safe_filename(base)
+
+
+def pbs_kids_series_folder_name(meta: Metadata) -> str:
+    return safe_filename(meta.show_title or meta.title)
+
+
+def pbs_kids_show_folder(folder: Path, meta: Metadata) -> Path:
+    resolved = folder.resolve()
+    root = resolved.parent if re.fullmatch(r"S\d{1,2}", resolved.name, re.I) else resolved
+    desired = pbs_kids_series_folder_name(meta)
+    if normalize_match_key(root.name) == normalize_match_key(desired):
+        return root
+    return root / desired
+
+
+def prepare_pbs_kids_media_group(
+    meta: Metadata, group: PBSKidsMediaGroup, settings: dict[str, Any]
+) -> PBSKidsMediaGroup:
+    rename = bool(settings.get("pbs_kids_series_rename_enabled", True))
+    organize = bool(settings.get("pbs_kids_series_organize_enabled", True))
+    if not (rename or organize):
+        return group
+    destination = pbs_kids_show_folder(group.folder, meta) / f"S{group.season:02d}" if organize else group.folder
+    base = pbs_kids_target_base(meta, group) if rename else group.stem
+    targets: list[tuple[Path, Path]] = []
+    used: set[Path] = set()
+    for source in group.files:
+        suffix = source.name[len(group.stem):]
+        target = destination / ((base + suffix) if rename else source.name)
+        if target in used or (target.exists() and target not in group.files):
+            raise FileExistsError(f"PBS KIDS rename target already exists: {target}")
+        used.add(target)
+        targets.append((source, target))
+    destination.mkdir(parents=True, exist_ok=True)
+    temporary: list[tuple[Path, Path]] = []
+    for index, (source, target) in enumerate(targets, start=1):
+        if source == target:
+            temporary.append((source, target))
+            continue
+        temp = source.with_name(f".pbs-kids-rename-{index}-{source.name}")
+        source.rename(temp)
+        temporary.append((temp, target))
+    for temporary_path, target in temporary:
+        if temporary_path != target:
+            temporary_path.rename(target)
+    final_files = [target for _source, target in targets]
+    video = next((path for path in final_files if path.suffix.casefold() in VIDEO_EXTENSIONS), None)
+    return PBSKidsMediaGroup(destination, video.stem if video else base, group.season, group.episode, final_files)
+
+
+def pbs_kids_parent_series_meta(meta: Metadata) -> Metadata:
+    if meta.media_kind.casefold() == "series":
+        return meta
+    if meta.series_metadata:
+        return metadata_from_provider_dict(
+            meta.series_metadata,
+            detail_link=clean_text(meta.series_metadata.get("source_url")),
+        )
+    raise ValueError("PBS KIDS episode metadata did not include its linked series metadata.")
+
+
+def pbs_kids_episode_metadata(meta: Metadata, record: dict[str, Any]) -> Metadata:
+    series_meta = pbs_kids_parent_series_meta(meta)
+    video_id = clean_text(record.get("id"))
+    legacy_id = clean_text(record.get("legacy_id"))
+    episode = Metadata(
+        source_url=clean_text(record.get("url")) or meta.source_url,
+        detail_link=clean_text(record.get("url")),
+        source_site=pbs_kids.NAME,
+        media_kind="episode",
+        title=series_meta.title,
+        show_title=series_meta.title,
+        season_number=clean_text(record.get("season")),
+        episode_number=clean_text(record.get("episode")),
+        episode_title=clean_text(record.get("title")),
+        outline=clean_text(record.get("short_description")),
+        plot=clean_text(record.get("long_description")) or clean_text(record.get("short_description")),
+        date=clean_text(record.get("date")),
+        year=clean_text(record.get("date"))[:4],
+        runtime_minutes=clean_text(record.get("runtime_minutes")),
+        thumb_url=clean_text(record.get("image")),
+        genres=list(series_meta.genres),
+        tags=list(series_meta.tags),
+        studios=list(series_meta.studios),
+        unique_ids={
+            key: value
+            for key, value in (
+                ("pbskids", video_id),
+                ("pbs", legacy_id),
+            )
+            if value
+        },
+        series_metadata=meta.series_metadata,
+    )
+    for label, value in (
+        ("PBS KIDS video ID", video_id),
+        ("Legacy PBS media ID", legacy_id),
+        ("Video type", record.get("type")),
+        ("Runtime seconds", record.get("duration_seconds")),
+    ):
+        episode.add_extra(label, value)
+    return episode
+
+
+def save_pbs_kids_show_art(meta: Metadata, folder: Path) -> list[Path]:
+    saved: list[Path] = []
+    for artwork_type, url in (("thumb", meta.thumb_url), ("logo", meta.logo_url)):
+        if not clean_text(url):
+            continue
+        extension = image_extension_from_url(url) or (".png" if artwork_type == "logo" else ".jpg")
+        target = folder / f"{artwork_type}{extension}"
+        if target.exists():
+            continue
+        path = download_binary(url, target)
+        if path:
+            saved.append(path)
+    return saved
+
+
+def ensure_pbs_kids_series_bundle(meta: Metadata, show_folder: Path) -> list[Path]:
+    series_meta = pbs_kids_parent_series_meta(meta)
+    if series_meta.media_kind.casefold() != "series" or not series_meta.plot:
+        raise ValueError("PBS KIDS linked series metadata was incomplete; episode metadata was not saved.")
+    show_folder.mkdir(parents=True, exist_ok=True)
+    saved: list[Path] = []
+    nfo = show_folder / "tvshow.nfo"
+    if not nfo.exists():
+        nfo.write_text(build_nfo(series_meta), encoding="utf-8")
+        saved.append(nfo)
+    saved.extend(save_pbs_kids_show_art(series_meta, show_folder))
+    return saved
+
+
+def save_pbs_kids_series_metadata(
+    meta: Metadata,
+    settings: dict[str, Any],
+    explicit_folder: str = "",
+    skip_existing: bool = False,
+) -> list[Path] | None:
+    if not pbs_kids_series_enabled(meta, settings, explicit_folder):
+        return None
+    matches = pbs_kids_media_groups(meta, settings, explicit_folder)
+    saved: list[Path] = []
+    bundled: set[Path] = set()
+    for group, record in matches:
+        episode_meta = pbs_kids_episode_metadata(meta, record)
+        prepared = prepare_pbs_kids_media_group(episode_meta, group, settings)
+        video = next((path for path in prepared.files if path.suffix.casefold() in VIDEO_EXTENSIONS), None)
+        if not video:
+            continue
+        show_folder = pbs_kids_show_folder(prepared.folder, episode_meta)
+        if show_folder not in bundled:
+            saved.extend(ensure_pbs_kids_series_bundle(meta, show_folder))
+            bundled.add(show_folder)
+        nfo = video.with_suffix(".nfo")
+        if not (skip_existing and nfo.exists()):
+            nfo.write_text(build_nfo(episode_meta), encoding="utf-8")
+            saved.append(nfo)
+        extension = image_extension_from_url(episode_meta.thumb_url) or ".jpg"
+        thumb = video.with_name(f"{video.stem}-thumb{extension}")
+        if episode_meta.thumb_url and not thumb.exists():
+            path = download_binary(episode_meta.thumb_url, thumb)
+            if path:
+                saved.append(path)
+    print(f"PBS KIDS series mode found {len(matches)} local episode(s) and saved {len(saved)} item(s).")
+    return saved
+
+
 def paramountplus_series_enabled(
     meta: Metadata, settings: dict[str, Any], explicit_folder: str = ""
 ) -> bool:
@@ -2177,6 +2463,14 @@ def save_provider_series_metadata(
     )
     if saved is not None:
         return saved
+    saved = save_pbs_kids_series_metadata(
+        meta,
+        settings,
+        explicit_folder=explicit_folder,
+        skip_existing=skip_existing,
+    )
+    if saved is not None:
+        return saved
     return save_paramountplus_series_metadata(
         meta,
         settings,
@@ -2210,6 +2504,21 @@ def output_plan(meta: Metadata, settings: dict[str, Any], explicit_folder: str =
         return (
             settings_output_dir(settings)
             / disneyplus_series_folder_name(meta)
+            / f"S{int(meta.season_number):02d}",
+            base,
+        )
+    if meta.source_site == pbs_kids.NAME and meta.media_kind.casefold() == "series":
+        return settings_output_dir(settings) / pbs_kids_series_folder_name(meta), "tvshow"
+    if (
+        meta.source_site == pbs_kids.NAME
+        and meta.media_kind.casefold() == "episode"
+        and meta.season_number.isdigit()
+        and meta.episode_number.isdigit()
+    ):
+        base = pbs_kids_target_base(meta)
+        return (
+            settings_output_dir(settings)
+            / pbs_kids_series_folder_name(meta)
             / f"S{int(meta.season_number):02d}",
             base,
         )
@@ -2257,12 +2566,16 @@ def save_metadata_bundle(meta: Metadata, settings: dict[str, Any], explicit_fold
     crunchyroll_series_folder: Path | None = None
     disneyplus_series_folder: Path | None = None
     paramountplus_series_folder: Path | None = None
+    pbs_kids_series_folder: Path | None = None
     if meta.source_site == crunchyroll.NAME and meta.media_kind.casefold() == "episode":
         crunchyroll_series_folder = crunchyroll_show_folder(folder, meta)
         saved.extend(ensure_crunchyroll_series_bundle(meta, crunchyroll_series_folder))
     if meta.source_site == disneyplus.NAME and meta.media_kind.casefold() == "episode":
         disneyplus_series_folder = disneyplus_show_folder(folder, meta)
         saved.extend(ensure_disneyplus_series_bundle(meta, disneyplus_series_folder))
+    if meta.source_site == pbs_kids.NAME and meta.media_kind.casefold() == "episode":
+        pbs_kids_series_folder = pbs_kids_show_folder(folder, meta)
+        saved.extend(ensure_pbs_kids_series_bundle(meta, pbs_kids_series_folder))
     if meta.source_site == paramountplus.NAME and meta.media_kind.casefold() == "episode":
         paramountplus_series_folder = paramountplus_show_folder(folder, meta)
         saved.extend(ensure_paramountplus_series_bundle(meta, paramountplus_series_folder))
@@ -2312,7 +2625,7 @@ def save_metadata_bundle_to_location(
     if disneyplus_movie_art:
         saved.extend(save_disneyplus_show_art(meta, folder, base_name=base_name))
     if meta.source_site == crunchyroll.NAME or (
-        meta.source_site in {disneyplus.NAME, paramountplus.NAME}
+        meta.source_site in {disneyplus.NAME, paramountplus.NAME, pbs_kids.NAME}
         and meta.media_kind.casefold() in {"series", "episode"}
     ):
         show_folder = folder
@@ -2322,6 +2635,8 @@ def save_metadata_bundle_to_location(
             saved.extend(save_crunchyroll_show_art(meta, show_folder))
         elif meta.source_site == disneyplus.NAME:
             saved.extend(save_disneyplus_show_art(meta, show_folder))
+        elif meta.source_site == pbs_kids.NAME:
+            saved.extend(save_pbs_kids_show_art(meta, show_folder))
         else:
             saved.extend(save_paramountplus_show_art(meta, show_folder))
         return saved
