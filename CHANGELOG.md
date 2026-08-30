@@ -48,6 +48,7 @@ All notable project changes are documented here. Published entries are derived f
 - Disney+ `/play/...` webpages are no longer treated as trailer files; only an explicitly trailer-labelled direct media URL can use Jellyfin's native `trailers/trailer.mp4` location.
 - Disney+ movies now use `Output/Disney+/Movie Title (Year)/` with collision-safe local movie/subtitle organization.
 - Disney+ movie handoffs now keep completed media beneath MediaFab's supplied destination instead of moving it into the tool's configured `Output/Disney+` directory, including exact completed-file handoffs and matching subtitle sidecars.
+- Disney+ artwork now preserves the provider's real roles: social key art is saved as `backdrop`, hero/banner art as `thumb`, and tightly trimmed title art as a genuine PNG `logo`; synthetic portrait posters and duplicate fanart/banner/landscape/gallery files are no longer created.
 
 ## 2026-07-24 — BBC iPlayer series metadata provider
 

@@ -55,7 +55,10 @@ def next_data():
             "genres": ["Comedy", "Music", "Animation"],
             "detailIcons": [{"alt": "TV-Y"}, {"alt": "Subtitles / CC"}],
             "backgroundImage": image("https://img.example/backdrop.webp?format=webp"),
-            "titleVisual": image("https://img.example/logo.webp?format=webp"),
+            "titleVisual": image(
+                "https://img.example/logo.webp?format=webp",
+                "logo-id",
+            ),
         },
         {
             "_type": "MediaDetails",
@@ -106,9 +109,11 @@ class DisneyPlusProviderTests(unittest.TestCase):
         self.assertEqual((item["series_start_year"], item["series_end_year"]), ("2026", "2026"))
         self.assertFalse(item["series_is_current"])
         self.assertEqual(len(item["series_episodes"]), 2)
-        self.assertIn("aspectRatio=0.71", item["poster_url"])
-        self.assertEqual(item["fanart_url"], "https://img.example/backdrop.webp?format=webp")
-        self.assertEqual(item["logo_url"], "https://img.example/logo.webp?format=webp")
+        self.assertEqual(item["poster_url"], "")
+        self.assertIn("aspectRatio=1.78", item["fanart_url"])
+        self.assertEqual(item["thumb_url"], "https://img.example/backdrop.webp?format=webp")
+        self.assertIn("logo-id/trim?format=png", item["logo_url"])
+        self.assertEqual(item["gallery_urls"], [])
         self.assertIn("Disney+ Provider", item["tags"])
         self.assertEqual(item["extra_fields"]["Accessibility"], ["Subtitles / CC"])
         self.assertEqual(item["extra_fields"]["Creator"], ["Ludo Studio"])
@@ -172,9 +177,10 @@ class DisneyPlusProviderTests(unittest.TestCase):
             self.assertTrue((season / f"{stem}.nfo").exists())
             self.assertTrue((season / f"{stem}-thumb.webp").exists())
             self.assertTrue((root / "tvshow.nfo").exists())
-            self.assertTrue((root / "poster.webp").exists())
             self.assertTrue((root / "backdrop.webp").exists())
-            self.assertTrue((root / "logo.webp").exists())
+            self.assertTrue((root / "thumb.webp").exists())
+            self.assertTrue((root / "logo.png").exists())
+            self.assertFalse((root / "poster.webp").exists())
             self.assertFalse((root / "trailers").exists())
             self.assertTrue(saved)
 
@@ -209,7 +215,9 @@ class DisneyPlusProviderTests(unittest.TestCase):
         meta = base.Metadata(
             source_url="https://www.disneyplus.com/browse/entity-movie",
             source_site="Disney+", media_kind="movie", title="Example Movie", year="2026",
-            poster_url="https://img.example/poster.webp?format=webp",
+            fanart_url="https://img.example/backdrop.webp?format=webp",
+            thumb_url="https://img.example/thumb.webp?format=webp",
+            logo_url="https://img.example/logo.png?format=png",
             trailer_url="https://media.example/trailer.mp4", tags=["Disney+ Provider"],
         )
         with tempfile.TemporaryDirectory() as temp:
@@ -220,6 +228,14 @@ class DisneyPlusProviderTests(unittest.TestCase):
                 base.save_metadata_bundle(meta, {"default_output_dir": temp})
             root = Path(temp) / "Disney+" / "Example Movie (2026)"
             self.assertTrue((root / "Example Movie (2026).nfo").exists())
+            self.assertTrue((root / "Example Movie (2026)-backdrop.webp").exists())
+            self.assertTrue((root / "Example Movie (2026)-thumb.webp").exists())
+            self.assertTrue((root / "Example Movie (2026)-logo.png").exists())
+            self.assertFalse((root / "Example Movie (2026)-poster.jpg").exists())
+            self.assertFalse((root / "Example Movie (2026)-banner.jpg").exists())
+            self.assertFalse((root / "Example Movie (2026)-landscape.jpg").exists())
+            self.assertFalse((root / "Example Movie (2026)-fanart.jpg").exists())
+            self.assertFalse((root / "extrafanart").exists())
             self.assertTrue((root / "trailers" / "trailer.mp4").exists())
 
     def test_disney_movie_handoff_stays_beneath_supplied_media_location(self):

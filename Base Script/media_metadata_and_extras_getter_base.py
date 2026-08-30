@@ -1723,13 +1723,14 @@ def disneyplus_episode_metadata(meta: Metadata, record: dict[str, Any]) -> Metad
     return episode
 
 
-def save_disneyplus_show_art(meta: Metadata, folder: Path) -> list[Path]:
+def save_disneyplus_show_art(meta: Metadata, folder: Path, base_name: str = "") -> list[Path]:
     saved: list[Path] = []
-    for artwork_type, url in (("poster", meta.poster_url), ("backdrop", meta.fanart_url), ("logo", meta.logo_url)):
+    for artwork_type, url in (("backdrop", meta.fanart_url), ("thumb", meta.thumb_url), ("logo", meta.logo_url)):
         if not clean_text(url):
             continue
-        extension = image_extension_from_url(url) or (".png" if artwork_type == "logo" else ".jpg")
-        target = folder / f"{artwork_type}{extension}"
+        extension = ".png" if artwork_type == "logo" else (image_extension_from_url(url) or ".jpg")
+        name = f"{base_name}-{artwork_type}" if base_name else artwork_type
+        target = folder / f"{name}{extension}"
         if target.exists():
             continue
         path = download_binary(url, target)
@@ -2307,6 +2308,9 @@ def save_metadata_bundle_to_location(
         saved.append(thumb)
     if not include_artwork:
         return saved
+    disneyplus_movie_art = meta.source_site == disneyplus.NAME and meta.media_kind.casefold() == "movie"
+    if disneyplus_movie_art:
+        saved.extend(save_disneyplus_show_art(meta, folder, base_name=base_name))
     if meta.source_site == crunchyroll.NAME or (
         meta.source_site in {disneyplus.NAME, paramountplus.NAME}
         and meta.media_kind.casefold() in {"series", "episode"}
@@ -2325,11 +2329,11 @@ def save_metadata_bundle_to_location(
     is_tvshow_bundle = meta.media_kind.casefold() == "series" and base_name == "tvshow" and not artwork_base_name
 
     poster_target = folder / ("poster.jpg" if is_tvshow_bundle else f"{artwork_base}-poster.jpg")
-    poster = download_binary(meta.poster_url, poster_target)
+    poster = None if disneyplus_movie_art else download_binary(meta.poster_url, poster_target)
     if poster:
         saved.append(poster)
     fanart_target = folder / ("fanart.jpg" if is_tvshow_bundle else f"{artwork_base}-fanart.jpg")
-    fanart = download_binary(meta.fanart_url, fanart_target)
+    fanart = None if disneyplus_movie_art else download_binary(meta.fanart_url, fanart_target)
     if fanart:
         saved.append(fanart)
         for suffix in ("-banner.jpg", "-landscape.jpg"):
@@ -2339,7 +2343,7 @@ def save_metadata_bundle_to_location(
             saved.append(duplicate)
     logo_extension = image_extension_from_url(meta.logo_url) or ".png"
     logo_target = folder / (f"logo{logo_extension}" if is_tvshow_bundle else f"{artwork_base}-logo{logo_extension}")
-    logo = download_binary(meta.logo_url, logo_target)
+    logo = None if disneyplus_movie_art else download_binary(meta.logo_url, logo_target)
     if logo:
         saved.append(logo)
 

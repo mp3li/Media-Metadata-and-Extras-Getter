@@ -121,7 +121,7 @@ Coverage depends on what the provider exposes in the public page data for each i
 - complete public multi-season guides from Disney+'s SEO season data, including episode IDs, season/episode placement, titles, synopses, `/play/...` URLs, and reconstructable 1920-wide thumbnails
 - the exact `Disney+ Provider` tag on every Disney+ movie, series, and episode NFO
 - an episode `/play/...` URL resolves the canonical parent entity and carries the full series metadata into the save, so an episode is never written without its `tvshow.nfo` and available series artwork
-- a 1000-pixel portrait composition as Jellyfin `poster`, the public wide hero as `backdrop`, transparent title art as `logo`, and a provider image as each episode's `-thumb`
+- Disney's public social key art as Jellyfin `backdrop`, its hero/banner art as `thumb`, its tightly trimmed transparent title art as a genuine PNG `logo`, and a provider image as each episode's `-thumb`; no portrait `poster` is invented when Disney does not expose one
 - the same year-qualified series folders, local-only guide matching, safe renaming, subtitle-suffix preservation, season organization, collision refusal, and no-double-nesting behavior as Crunchyroll and Paramount+
 - Disney+ movies use `Output/Disney+/Movie Title (Year)/` during ordinary link processing. A MediaFab handoff instead keeps the movie beneath the supplied media location as `Movie Title (Year)/`; local movie and subtitle sidecars are moved and renamed only after collision validation
 - a provider-exposed direct trailer, when one exists, is saved under Jellyfin's native `trailers/trailer.mp4`; a Disney+ `/play/...` webpage is never mistaken for downloadable trailer media, and no YouTube fallback is used
@@ -343,9 +343,9 @@ Disney+ series mode uses the same Jellyfin layout and safety contract as Crunchy
 ```text
 Bluey Tunes (2026)/
   tvshow.nfo
-  poster.webp
   backdrop.webp
-  logo.webp
+  thumb.webp
+  logo.png
   S01/
     S01E01 Bluey Tunes - Taxi.mkv
     S01E01 Bluey Tunes - Taxi.en_us.srt

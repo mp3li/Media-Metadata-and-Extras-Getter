@@ -76,7 +76,8 @@ def series_metadata(hero: dict[str, Any], details: dict[str, Any], episodes: dic
     rating = content_rating(hero, details)
     directors, cast, creators = credits_from_details(details.get("credits"))
     social = meta_content(metadata_block, "og:image")
-    backdrop = image_source(hero.get("backgroundImage")) or social
+    hero_image = image_source(hero.get("backgroundImage"))
+    backdrop = social or hero_image
     fields: dict[str, list[str]] = {}
     add_field(fields, "Disney+ entity ID", entity_id)
     add_field(fields, "Season count", str(len(seasons)) if seasons else number_text(hero.get("seasonsAvailable")))
@@ -96,13 +97,13 @@ def series_metadata(hero: dict[str, Any], details: dict[str, Any], episodes: dic
         "title": title, "show_title": title, "outline": short_description or description, "plot": description,
         "year": start_year, "series_start_year": start_year, "series_end_year": end_year,
         "series_is_current": current, "content_rating": rating,
-        "poster_url": portrait_image_url(social or backdrop), "fanart_url": backdrop,
-        "logo_url": image_source(hero.get("titleVisual")), "trailer_url": public_trailer_url(data),
+        "poster_url": "", "fanart_url": backdrop, "thumb_url": hero_image or backdrop,
+        "logo_url": trimmed_png_logo_url(hero.get("titleVisual")), "trailer_url": public_trailer_url(data),
         "production_label": "Provider", "genres": split_values(hero.get("genres") or details.get("genres")),
         "tags": provider_tags(), "studios": [STUDIO_NAME], "directors": directors,
         "actors": [{"name": name, "role": ""} for name in cast],
         "unique_ids": {"disneyplus": entity_id} if entity_id else {}, "extra_fields": fields,
-        "gallery_urls": dedupe_text([social, backdrop]), "series_episodes": records,
+        "gallery_urls": [], "series_episodes": records,
         "folder_name_override": title,
     }
 
@@ -145,7 +146,8 @@ def movie_metadata(hero: dict[str, Any], details: dict[str, Any], metadata_block
     release = first_non_empty(details.get("release"), hero.get("releaseYear"), json_ld.get("datePublished"))
     directors, cast, creators = credits_from_details(details.get("credits"))
     social = meta_content(metadata_block, "og:image") or clean_text(json_ld.get("image"))
-    backdrop = image_source(hero.get("backgroundImage")) or social
+    hero_image = image_source(hero.get("backgroundImage"))
+    backdrop = social or hero_image
     rating = content_rating(hero, details)
     fields: dict[str, list[str]] = {}
     add_field(fields, "Disney+ entity ID", entity_id)
@@ -159,14 +161,14 @@ def movie_metadata(hero: dict[str, Any], details: dict[str, Any], metadata_block
         "source_url": source_url, "source_site": NAME, "media_kind": "movie", "title": title,
         "outline": short_description or description, "plot": description, "year": first_year(release),
         "runtime_minutes": first_non_empty(runtime_minutes_from_ms(hero.get("runtimeMs")), runtime_minutes_from_ms(details.get("runtimeMs"))),
-        "content_rating": rating, "poster_url": portrait_image_url(social or backdrop),
-        "fanart_url": backdrop, "logo_url": image_source(hero.get("titleVisual")),
+        "content_rating": rating, "poster_url": "", "fanart_url": backdrop,
+        "thumb_url": hero_image or backdrop, "logo_url": trimmed_png_logo_url(hero.get("titleVisual")),
         "trailer_url": public_trailer_url(data), "production_label": "Provider",
         "genres": split_values(hero.get("genres") or details.get("genres") or json_ld.get("genre")),
         "tags": provider_tags(), "studios": [STUDIO_NAME], "directors": directors,
         "actors": [{"name": name, "role": ""} for name in cast],
         "unique_ids": {"disneyplus": entity_id} if entity_id else {}, "extra_fields": fields,
-        "gallery_urls": dedupe_text([social, backdrop]), "folder_name_override": title,
+        "gallery_urls": [], "folder_name_override": title,
     }
 
 
@@ -277,15 +279,21 @@ def ripcut_image_url(image_block: Any, width: int, aspect_ratio: str) -> str:
     return ""
 
 
-def portrait_image_url(url: str) -> str:
-    text = clean_text(url)
-    if not text or "disney.images.edge.bamgrid.com/ripcut-delivery/" not in text:
-        return text
-    parsed = urllib.parse.urlsplit(text)
-    query = dict(urllib.parse.parse_qsl(parsed.query, keep_blank_values=True))
-    query.update({"aspectRatio": "0.71", "format": "webp", "width": "1000"})
-    query.pop("max", None)
-    return urllib.parse.urlunsplit((parsed.scheme, parsed.netloc, parsed.path, urllib.parse.urlencode(query), ""))
+def trimmed_png_logo_url(image_block: Any) -> str:
+    """Request Disney's own tightly trimmed title art as an actual PNG."""
+    if not isinstance(image_block, dict):
+        return ""
+    for key in ("xxlargeImage", "xlargeImage", "largeImage", "defaultImage", "mediumImage", "smallImage"):
+        value = image_block.get(key)
+        if not isinstance(value, dict):
+            continue
+        ripcut_id = clean_text(value.get("ripcutId") or value.get("imageId"))
+        if ripcut_id:
+            return (
+                "https://disney.images.edge.bamgrid.com/ripcut-delivery/v2/variant/disney/"
+                f"{ripcut_id}/trim?format=png&max=800%7C300"
+            )
+    return ""
 
 
 def public_trailer_url(data: Any) -> str:
