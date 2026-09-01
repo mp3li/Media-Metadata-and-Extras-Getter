@@ -140,6 +140,13 @@ class ParamountPlusProviderTests(unittest.TestCase):
         self.assertEqual(root.tag, "tvshow")
         self.assertIn("Paramount+ Provider", [node.text for node in root.findall("tag")])
 
+    def test_advertised_season_failure_refuses_partial_queue_catalog(self):
+        with patch.object(paramountplus, "all_season_urls", return_value={2: "https://example.test/season/2/"}), patch.object(
+            paramountplus, "fetch_text", side_effect=RuntimeError("offline")
+        ):
+            with self.assertRaisesRegex(RuntimeError, "refusing a partial Queue Mode catalog"):
+                paramountplus.show_metadata_from_page(SHOW_PAGE, SHOW_URL, timeout=25)
+
     def test_series_year_forms(self):
         records = [{"date": "2025-01-01"}]
         self.assertEqual(paramountplus.series_run_years("2025", records, date(2025, 2, 1)), ("2025", "2025", True))

@@ -9,6 +9,7 @@ import re
 import subprocess
 import urllib.parse
 import urllib.request
+from datetime import date, timedelta
 from typing import Any
 
 
@@ -34,7 +35,61 @@ def episode_id_from_url(url: str) -> str:
 
 def extract_metadata(url: str, timeout: int = 25) -> dict[str, Any]:
     state = extract_page_state(fetch_text(url, timeout=timeout))
-    return metadata_from_state(state, url)
+    item = metadata_from_state(state, url)
+    if item.get("media_kind") != "episode":
+        return item
+    related = as_dict(state.get("relatedEpisodes"))
+    records = related_episode_records(related, clean_text(item.get("title")))
+    current_slice = clean_text(related.get("currentSliceId"))
+    for slice_item in as_list(related.get("slices")):
+        slice_id = clean_text(as_dict(slice_item).get("id"))
+        if not slice_id or slice_id == current_slice:
+            continue
+        parsed = urllib.parse.urlsplit(url)
+        query = urllib.parse.parse_qs(parsed.query)
+        query["seriesId"] = [slice_id]
+        slice_url = urllib.parse.urlunsplit(
+            (parsed.scheme or "https", parsed.netloc, parsed.path, urllib.parse.urlencode(query, doseq=True), "")
+        )
+        try:
+            slice_state = extract_page_state(fetch_text(slice_url, timeout=timeout))
+        except Exception as exc:
+            raise RuntimeError(
+                f"BBC iPlayer series slice {slice_id} could not be loaded; refusing a partial Queue Mode catalog."
+            ) from exc
+        records.extend(
+            related_episode_records(
+                as_dict(slice_state.get("relatedEpisodes")), clean_text(item.get("title"))
+            )
+        )
+    records = dedupe_episode_records(records)
+    item["series_episodes"] = records
+    years = sorted({clean_text(record.get("date"))[:4] for record in records if clean_text(record.get("date"))[:4].isdigit()})
+    start = years[0] if years else clean_text(item.get("year"))
+    end = years[-1] if years else start
+    latest_dates = [clean_text(record.get("date")) for record in records if clean_text(record.get("date"))]
+    latest = max(latest_dates, default="")
+    current = False
+    try:
+        current = bool(latest and date.fromisoformat(latest) >= date.today() - timedelta(days=45))
+    except ValueError:
+        current = False
+    item["series_start_year"] = start
+    item["series_end_year"] = end
+    item["series_is_current"] = current
+    series = dict(item)
+    series.update({
+        "media_kind": "series",
+        "show_title": clean_text(item.get("title")),
+        "season_number": "",
+        "episode_number": "",
+        "episode_title": "",
+        "date": "",
+        "runtime_minutes": "",
+        "series_metadata": {},
+    })
+    item["series_metadata"] = series
+    return item
 
 
 def metadata_from_state(state: dict[str, Any], source_url: str) -> dict[str, Any]:
@@ -103,6 +158,7 @@ def metadata_from_state(state: dict[str, Any], source_url: str) -> dict[str, Any
         "production_label": "Broadcaster",
         "genres": [nested(episode, "labels", "category")],
         "studios": [STUDIO_NAME],
+        "tags": [NAME, f"Provider: {NAME}", "BBC iPlayer Provider"],
         "unique_ids": {"bbc_iplayer": episode_id, "bbc_programme": programme_id},
         "extra_fields": fields,
         "folder_name_override": title,
@@ -114,6 +170,55 @@ def metadata_from_state(state: dict[str, Any], source_url: str) -> dict[str, Any
         "bbc_episode_id": episode_id,
         "bbc_programme_id": programme_id,
     }
+
+
+def related_episode_records(related: dict[str, Any], show_title: str) -> list[dict[str, Any]]:
+    records: list[dict[str, Any]] = []
+    for wrapper in as_list(related.get("episodes")):
+        episode = as_dict(as_dict(wrapper).get("episode"))
+        episode_id = clean_text(episode.get("id"))
+        subtitle_default = nested(episode, "subtitle", "default")
+        subtitle_slice = nested(episode, "subtitle", "slice")
+        season, number = series_and_episode(subtitle_default)
+        if not (episode_id and season and number):
+            continue
+        versions = as_list(episode.get("versions"))
+        version = first_dict(versions)
+        synopsis = as_dict(episode.get("synopsis")) or as_dict(episode.get("synopses"))
+        images = as_dict(episode.get("images"))
+        image = (
+            image_url(images.get("standard")) if isinstance(images.get("standard"), str) else ""
+        ) or (
+            image_url(images.get("promotional")) if isinstance(images.get("promotional"), str) else ""
+        )
+        release = iso_date(
+            clean_text(episode.get("releaseDateTime"))
+            or clean_text(episode.get("releaseDate"))
+            or clean_text(version.get("firstBroadcast"))
+        )
+        records.append({
+            "id": episode_id,
+            "url": canonical_episode_url(episode_id),
+            "show_title": show_title,
+            "season": season,
+            "episode": number,
+            "title": episode_label(subtitle_slice or subtitle_default),
+            "description": clean_text(synopsis.get("large") or synopsis.get("medium") or synopsis.get("small")),
+            "outline": clean_text(synopsis.get("small") or synopsis.get("medium") or synopsis.get("large")),
+            "duration": clean_text(nested(version, "duration", "seconds") or episode.get("firstVersionDuration")),
+            "date": release,
+            "image": image,
+        })
+    return records
+
+
+def dedupe_episode_records(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    output: dict[tuple[int, int, str], dict[str, Any]] = {}
+    for record in records:
+        key = (int(record.get("season") or 0), int(record.get("episode") or 0), clean_text(record.get("id")))
+        if key[0] and key[1] and key[2]:
+            output[key] = record
+    return sorted(output.values(), key=lambda record: (record["season"], record["episode"], record["id"]))
 
 
 def fetch_series_episodes(url: str, timeout: int = 25) -> list[dict[str, Any]]:

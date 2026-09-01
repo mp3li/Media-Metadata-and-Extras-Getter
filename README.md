@@ -8,7 +8,7 @@
   <img alt="Status" src="https://img.shields.io/badge/Status-In_Active_Development-660000?style=flat-square&labelColor=04040c" />
   <img alt="Interface" src="https://img.shields.io/badge/Interface-Terminal-660000?style=flat-square&labelColor=04040c" />
   <img alt="Metadata" src="https://img.shields.io/badge/Metadata-Jellyfin_Style_NFO-660000?style=flat-square&labelColor=04040c" />
-  <img alt="Providers" src="https://img.shields.io/badge/Providers-Amazon%2C_Netflix%2C_Disney%2B%2C_BBC%2C_Paramount%2B%2C_Crunchyroll_%26_PBS_KIDS-660000?style=flat-square&labelColor=04040c" />
+  <img alt="Providers" src="https://img.shields.io/badge/Providers-Amazon%2C_Netflix%2C_Disney%2B%2C_Max%2C_BBC%2C_Paramount%2B%2C_Crunchyroll_%26_PBS_KIDS-660000?style=flat-square&labelColor=04040c" />
   <img alt="Downloads" src="https://img.shields.io/badge/Downloads-Artwork%2C_Trailers_%26_Metadata-660000?style=flat-square&labelColor=04040c" />
   <img alt="Bulk Processing" src="https://img.shields.io/badge/Bulk_Processing-Optional-660000?style=flat-square&labelColor=04040c" />
   <img alt="Platform" src="https://img.shields.io/badge/Platform-macOS-660000?style=flat-square&labelColor=04040c" />
@@ -24,6 +24,7 @@
 - [About the Project](#about-the-project)
 - [What the Tool Does](#what-the-tool-does)
 - [Supported Providers](#supported-providers)
+- [Queue Mode Provider Standard](#queue-mode-provider-standard)
 - [Provider Coverage](#provider-coverage)
 - [Requirements](#requirements)
 - [How to Run](#how-to-run)
@@ -31,6 +32,7 @@
 - [Importing mylinks.txt](#importing-mylinkstxt)
 - [Settings](#settings)
 - [Amazon Prime Video Series Mode](#amazon-prime-video-series-mode)
+- [Netflix Queue Mode](#netflix-queue-mode)
 - [BBC Series Mode](#bbc-series-mode)
 - [Disney+ Series Mode](#disney-series-mode)
 - [HBO Max Series Mode](#hbo-max-series-mode)
@@ -102,6 +104,21 @@ Unsupported providers do not fall back to generic scraping. The tool prints:
 Unfortunately this tool does not cover that provider at this time. Please make an Issue on Github for a Feature Request.
 ```
 
+## Queue Mode Provider Standard
+
+Every supported television provider follows the same local-only MediaFab handoff contract where its public catalog supplies exact episode identities:
+
+- MediaFab supplies one common queue destination as `--media-folder`; the tool creates or reuses exactly one year-qualified series folder beneath it, with `tvshow.nfo` and available series artwork beside `S01`, `S02`, and later season folders.
+- The provider catalog is an identity table, not a download list. Only completed local media receives episode NFO files and one matching landscape `-thumb`; absent episodes receive nothing.
+- Exact provider IDs in completed filenames take priority over stale season/episode text. Recognized placement and title matching are fallbacks; runtime, duration, queue order, and anonymous timestamp names are never used to guess identity.
+- Existing subtitle suffixes and already-generated episode NFO/thumbnail sidecars move with their episode. Destinations are validated before a two-phase rename or move, and existing files are never overwritten.
+- Separate MediaFab job folders converge into the same series root. A source folder is removed only after the successful workflow proves it empty apart from `.DS_Store`.
+- A broad shared destination may contain other organized shows: existing foreign series roots are excluded before position or title fallback, so another show's `S01E01` cannot be claimed by the current catalog.
+- A catalog page that advertises additional seasons but cannot load them fails closed instead of silently organizing against a partial guide. Optional trailer or extra-video failure remains non-fatal and provider-isolated.
+- Transparent provider logos are byte-checked and converted to genuine PNG when macOS can convert the source; otherwise their truthful image extension is retained rather than disguising another format as PNG.
+
+The identity MediaFab should preserve is provider-specific: Crunchyroll watch ID, Disney+ play UUID, Max episode UUID, Paramount+ episode ID, Prime Video compact ID/GTI/ASIN, PBS KIDS video or legacy media ID, BBC programme PID, or Netflix title/episode ID. Netflix series Queue Mode deliberately skips organization when its public title data does not expose a complete identifiable episode catalog.
+
 ## Provider Coverage
 
 Coverage depends on what the provider exposes in the public page data for each individual title. A missing field means the page did not provide a usable value; the tool does not invent one.
@@ -123,6 +140,9 @@ Coverage depends on what the provider exposes in the public page data for each i
 - Netflix title identifier
 - poster and wide artwork
 - a direct trailer only when a usable direct media URL is exposed
+- the exact `Netflix Provider` tag on every Netflix NFO
+- movie handoffs remain beneath the supplied MediaFab destination in `Movie Title (Year)/`, with matching local media and subtitles renamed only after collision validation
+- series Queue Mode is available only when the public title data exposes episode IDs with exact season/episode placement; those IDs outrank stale filename placement, locally present episodes are consolidated into one year-qualified series root, and an incomplete or absent public guide is skipped without guessing
 
 ### Disney+
 
@@ -153,8 +173,9 @@ Coverage depends on what the provider exposes in the public page data for each i
 
 - title, full/medium/short/programme synopses, first broadcast, release date, duration, BBC channel, category, version, availability, and public BBC identifiers when exposed
 - poster, promotional wide image, and promotional image with logo when exposed
-- the complete visible episode-card metadata for the selected series: each episode's title, short synopsis, duration, availability, BBC episode ID, plus the available series/collection selector entries
+- the complete public multi-slice episode catalog for the selected series: each episode's title, short synopsis, duration, availability, BBC episode ID, plus the available series/collection selector entries; a failed advertised slice refuses partial Queue Mode output
 - a proper Jellyfin-style `<episodedetails>` NFO for series episodes, including `showtitle`, `season`, and `episode`; one-off programmes continue to use a `<movie>` NFO
+- the exact `BBC iPlayer Provider` tag, BBC PID-first matching, one year-qualified series root, season folders, series-level `tvshow.nfo` and artwork, episode NFO/thumb sidecars, collision refusal, and safe cleanup of proven-empty MediaFab job folders
 - BBC provides media playback through its own service. This tool only retrieves public page metadata and directly exposed artwork; it is not a BBC downloader.
 
 ### Paramount+
@@ -168,7 +189,7 @@ Coverage depends on what the provider exposes in the public page data for each i
 - Jellyfin series folders named `Series Title (Year)` for a completed single-year run, `Series Title (Start Year-End Year)` for a completed multi-year run, or `Series Title (Start Year-)` while currently airing
 - one provider-supplied public preview, when available and confirmed clear, under Jellyfin's native `trailers/trailer.mp4` layout; provider-exposed public extras use `Extras/Videos/`, both run last, and Paramount+ never uses the Crunchyroll YouTube fallback
 - movie pages add feature-film synopsis, runtime, rating, genre, cast/credit, movie ID, distinct provider poster/backdrop/title-logo roles, and their autoplaying public preview; a MediaFab handoff remains beneath the explicitly supplied location instead of being redirected to the default output directory
-- title logos are byte-checked and converted to genuine PNG when necessary; a single source image is never duplicated into invented movie poster, fanart, banner, and landscape roles
+- all saved Paramount+ artwork is byte-checked and converted to genuine PNG; invalid image responses are rejected, and a single source image is never duplicated into invented movie poster, fanart, banner, and landscape roles
 - public clip pages add clip title, synopsis, duration, date, rating, full-resolution artwork, public manifest, and exposed caption status. A clear DASH or HLS manifest is saved only when it contains no DRM declaration; the provider uses ordinary `ffmpeg` remuxing without keys or DRM tooling.
 - the Korra preview currently advertises `CLOSED-CAPTIONS=NONE`; subscription feature/episode playback and any subtitle tracks behind it are not downloaded by this tool.
 
@@ -466,9 +487,9 @@ Paramount+ series mode produces the same Jellyfin layout and safety guarantees a
 ```text
 Series Title (Start Year-)/
   tvshow.nfo
-  poster.ext
-  backdrop.ext
-  logo.ext
+  poster.png
+  backdrop.png
+  logo.png
   trailers/
     trailer.mp4
   S01/
@@ -535,7 +556,7 @@ Paramount+ movie pages use a provider and movie-title folder, with the title and
 ```text
 Output/Paramount+/Avatar Aang - The Last Airbender (2026)/
   Avatar Aang - The Last Airbender (2026).nfo
-  Avatar Aang - The Last Airbender (2026)-poster.jpg
+  Avatar Aang - The Last Airbender (2026)-poster.png
   trailers/
     trailer.mp4
 ```
@@ -567,13 +588,13 @@ It also recognises the normalized names it produces, such as `S02E07 The Great B
 
 ```json
 "bbc_series_metadata_enabled": true,
-"bbc_series_rename_enabled": false,
-"bbc_series_organize_enabled": false
+"bbc_series_rename_enabled": true,
+"bbc_series_organize_enabled": true
 ```
 
-- Set `bbc_series_rename_enabled` to `true` to rename matching local videos to `S01E07 The Great British Sewing Bee.mp4`. Matching subtitle files are renamed alongside the video; when the original filename does not establish the subtitle language, the safe `und` language code is used, for example `S01E07 The Great British Sewing Bee.und.srt`.
-- Set `bbc_series_organize_enabled` to `true` to move the matching video and subtitle files into `S01`, `S02`, and so on within their existing parent folder. Every episode gets its own NFO, while the public BBC artwork bundle is saved only once per season with a show-specific name, such as `The Great British Sewing Bee - season01-poster.jpg` and `The Great British Sewing Bee - season01-fanart.jpg`.
-- Both actions are deliberately opt-in. The tool will not overwrite a conflicting destination filename.
+- `bbc_series_rename_enabled` renames matching local videos to `S01E07 Show Title - Episode Title` and retains the full suffix of each matching subtitle sidecar.
+- `bbc_series_organize_enabled` places each episode beneath the one year-qualified series root in `S01`, `S02`, and later folders, with `tvshow.nfo` and series artwork at the root.
+- Both actions are enabled by default for the shared Queue Mode contract. Either can be disabled independently; conflicting destinations are never overwritten.
 
 ## Amazon Prime Video Series Mode
 
@@ -611,13 +632,19 @@ The rating tags are written together and in this exact order for Jellyfin plugin
 
 The values come from the selected Prime Video detail page and can change; the tag names and ordering remain fixed. Series artwork uses only the clean hero `backdrop`, card `thumb`, and transparent `logo`. Episode images use the matching `-thumb` name.
 
+## Netflix Queue Mode
+
+Netflix movie handoffs use the supplied MediaFab destination and create `Movie Title (Year)/` there, moving only the matched video and its directly linked subtitle sidecars after collision checks. Available provider poster/backdrop artwork and a direct public trailer are saved in their Jellyfin roles; trailer work runs after the metadata and organization workflow.
+
+Netflix series Queue Mode is intentionally stricter because public Netflix title pages do not consistently expose a complete episode guide. It runs only when the page data supplies an exact Netflix episode ID together with season and episode placement. When that catalog exists, completed filenames containing those IDs are matched before any stale `SxxExx` text, separate job folders converge into one year-qualified series root, and only local episodes receive NFO and thumbnail files. When the public catalog is missing or incomplete, the provider reports that Queue Mode was skipped and leaves the media untouched instead of guessing by duration, queue order, or timestamp filename.
+
 ## BBC Series Mode
 
-BBC series mode is designed for a library that already contains the episodes. It does not download video or subtitle media. Instead, it matches the BBC IDs and season/episode numbers in your existing files, retrieves public BBC metadata for those matched episodes, and writes local sidecars beside them.
+BBC series mode is designed for a library or MediaFab queue that already contains the episodes. It does not download video or subtitle media. Instead, it builds the complete public catalog across every advertised series slice, matches BBC PIDs before filename placement or titles, and writes metadata only for episodes that exist locally.
 
 ### Links to provide
 
-Give the tool **one representative BBC iPlayer episode link per show**. You do not need one link per season: one Sewing Bee link can process every locally present Sewing Bee season, while one One Piece link can process every locally present One Piece episode.
+Give the tool **one representative BBC iPlayer episode link per show**. You do not need one link per season: its related-series data is used to load every advertised slice before any Queue Mode organization begins. If an advertised slice cannot be loaded, the run stops rather than treating a partial catalog as complete.
 
 For several shows, add one representative link for each show to `My Links Txt/mylinks.txt` and choose import mode. The tool processes the shows one at a time; each link only matches files belonging to that show.
 
@@ -637,7 +664,7 @@ If a same-basename `.jpg` sits beside an otherwise matching BBC media file, the 
 
 For every matched episode, the tool fetches its own public BBC page data and writes an episode NFO beside the local video. BBC episode NFOs use `<episodedetails>` with `showtitle`, `season`, and `episode`, along with the available full/medium/short synopses, dates, runtime, channel, category, availability, BBC IDs, related episode cards, and available series selectors.
 
-Public BBC poster, wide, banner, landscape, and logo artwork is saved once per populated season rather than once per episode. Its show-specific name prevents collisions in shared folders, for example:
+In the default Queue Mode layout, available public BBC series artwork is saved at the year-qualified series root beside `tvshow.nfo`, while each episode receives its own NFO and one landscape thumbnail in the matching season folder. The older season-art layout remains available when organization is disabled.
 
 ```text
 One Piece - season02-poster.jpg
@@ -647,7 +674,7 @@ The Great British Sewing Bee - season01-poster.jpg
 
 ### Optional file actions
 
-With both BBC rename and organize settings set to `false`, the source video and subtitle filenames remain untouched. The NFO is written beside the existing video and the season artwork is written in that existing folder.
+With both BBC rename and organize settings set to `false`, the source video and subtitle filenames remain untouched. The NFO is written beside the existing video and the legacy season artwork is written in that existing folder.
 
 With `bbc_series_rename_enabled` set to `true`, matching files are renamed as follows:
 
@@ -663,7 +690,7 @@ S01E05 The Great British Sewing Bee - Christmas Special.mp4
 
 The One Piece pattern retains the show, series/arc title, and episode title; it removes only the BBC ID and a trailing range such as `(62-135)`. The Sewing Bee pattern uses the shorter show-only name, except that specials retain their descriptive label.
 
-With `bbc_series_organize_enabled` set to `true`, the matching video, subtitle, NFO, and season artwork are placed under `S01`, `S02`, and so on in their existing parent folder. The tool checks for collisions before renaming or moving files and will not overwrite an existing destination.
+With `bbc_series_organize_enabled` set to `true`—the default—the matching video, subtitle, episode NFO, and thumbnail are placed under `S01`, `S02`, and so on beneath one year-qualified series root. Series metadata and artwork remain beside those season folders. Separate Queue Mode job folders converge into that same root and are removed only after they are proven empty. The tool checks for collisions before renaming or moving files and will not overwrite an existing destination.
 
 ## Crunchyroll Series Mode
 
@@ -760,13 +787,13 @@ Output/Example Movie/Extras/Trailers/trailer.mp4
 Output/Example Movie/extrafanart/fanart-01.jpg
 ```
 
-Disney+ and Paramount+ movies are the exceptions during ordinary link processing: they save under `Output/<Provider>/Movie Title (Year)/` and use `Movie Title (Year)` for their metadata, artwork, and local matched movie filename. During a Disney+ MediaFab handoff, that year-qualified movie folder is created beneath the exact supplied media location instead of the configured default output. Disney+ uses Jellyfin's native `trailers/` directory only when its public page exposes a real direct trailer.
+Disney+ and Paramount+ movies are the exceptions during ordinary link processing: they save under `Output/<Provider>/Movie Title (Year)/` and use `Movie Title (Year)` for their metadata, artwork, and local matched movie filename. During Disney+, Max, Paramount+, or Netflix MediaFab movie handoffs, the year-qualified movie folder remains beneath the supplied media location. Provider-native direct trailers use Jellyfin's `trailers/trailer.mp4` layout and run only after the main workflow.
 
 When media matching finds a local video, the real filename replaces `<title>` in the NFO and artwork names. Available extra videos are saved under `Extras/Videos/`.
 
 ## Metadata Written to the NFO
 
-The generated NFO has a `<movie>` root for films/one-off programmes, a `<tvshow>` root for Amazon Prime Video, Disney+, HBO Max, Paramount+, Crunchyroll, and PBS KIDS series pages, or an `<episodedetails>` root for matched episodes, and can include:
+The generated NFO has a `<movie>` root for films/one-off programmes, a `<tvshow>` root for Amazon Prime Video, Netflix, Disney+, HBO Max, BBC iPlayer, Paramount+, Crunchyroll, and PBS KIDS series pages, or an `<episodedetails>` root for matched episodes, and can include:
 
 - title, original title, sort title, outline, plot, tagline, year, and date
 - runtime, rating, content rating, and language

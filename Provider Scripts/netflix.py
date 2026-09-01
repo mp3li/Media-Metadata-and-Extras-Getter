@@ -79,13 +79,18 @@ def extract_metadata(url: str, timeout: int = 25) -> dict[str, Any]:
     )
     source_url = first_non_empty(meta_value(html_text, "og:url"), url)
     title_id = match_group(r"/title/(\d+)", url)
+    object_type = clean_text(video_object.get("@type")).casefold()
+    media_kind = "movie" if object_type == "movie" else ("series" if object_type == "tvseries" else "")
+    episodes = netflix_episode_records([video_object, state], title)
     extra_fields: dict[str, list[str]] = {}
     starring = dedupe(parse_starring_fallback(visible_lines))
     if starring:
         extra_fields["Starring"] = starring
+    provider_tags = [NAME, f"Provider: {NAME}", "Netflix Provider"]
     return {
         "source_url": source_url,
         "source_site": NAME,
+        "media_kind": media_kind,
         "title": title,
         "outline": plot,
         "plot": plot,
@@ -97,13 +102,62 @@ def extract_metadata(url: str, timeout: int = 25) -> dict[str, Any]:
         "trailer_url": trailer,
         "production_label": "Provider",
         "genres": genres,
-        "tags": tags,
+        "tags": dedupe([*provider_tags, *tags]),
         "studios": [NAME],
         "actors": [{"name": name, "role": ""} for name in cast],
         "unique_ids": {"netflix": title_id} if title_id else {},
         "extra_fields": extra_fields,
         "folder_name_override": title,
+        "series_episodes": episodes,
+        "series_start_year": year if media_kind == "series" else "",
+        "series_end_year": year if media_kind == "series" else "",
+        "series_is_current": False,
     }
+
+
+def netflix_episode_records(values: list[Any], show_title: str) -> list[dict[str, Any]]:
+    """Collect only public records with a provable Netflix ID and season/episode placement."""
+    records: dict[tuple[int, int, str], dict[str, Any]] = {}
+
+    def visit(value: Any) -> None:
+        if isinstance(value, list):
+            for item in value:
+                visit(item)
+            return
+        if not isinstance(value, dict):
+            return
+        episode_number = clean_text(value.get("episodeNumber") or value.get("episode"))
+        season_value = value.get("seasonNumber") or value.get("season")
+        if isinstance(value.get("partOfSeason"), dict):
+            season_value = value["partOfSeason"].get("seasonNumber") or season_value
+        season_number = clean_text(season_value)
+        url = clean_text(value.get("url") or value.get("canonicalUrl"))
+        identifier = first_non_empty(
+            match_group(r"/title/(\d+)", url),
+            clean_text(value.get("videoId") or value.get("titleId") or value.get("id")),
+        )
+        if season_number.isdigit() and episode_number.isdigit() and identifier.isdigit():
+            image = value.get("image")
+            if isinstance(image, dict):
+                image = image.get("url")
+            records[(int(season_number), int(episode_number), identifier)] = {
+                "id": identifier,
+                "url": url or f"https://www.netflix.com/title/{identifier}",
+                "show_title": show_title,
+                "season": int(season_number),
+                "episode": int(episode_number),
+                "title": clean_text(value.get("name") or value.get("title")),
+                "description": clean_text(value.get("description") or value.get("synopsis")),
+                "duration": duration_minutes(clean_text(value.get("duration"))),
+                "date": clean_text(value.get("datePublished"))[:10],
+                "image": clean_text(image),
+            }
+        for child in value.values():
+            if isinstance(child, (dict, list)):
+                visit(child)
+
+    visit(values)
+    return sorted(records.values(), key=lambda record: (record["season"], record["episode"], record["id"]))
 
 
 def fetch_text(url: str, timeout: int = 25) -> str:
@@ -209,7 +263,7 @@ def extract_video_object(html_text: str) -> dict[str, Any]:
         elif isinstance(data, list):
             objects.extend(item for item in data if isinstance(item, dict))
         for item in objects:
-            if clean_text(item.get("@type")).casefold() in {"movie", "videoobject", "tvseries"}:
+            if clean_text(item.get("@type")).casefold() in {"movie", "videoobject", "tvseries", "tvepisode"}:
                 return item
     return {}
 

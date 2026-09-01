@@ -206,8 +206,10 @@ def show_metadata_from_page(page: str, source_url: str, timeout: int) -> dict[st
     for season_number, season_url in seasons.items():
         try:
             season_page = fetch_text(season_url, timeout=timeout)
-        except Exception:
-            continue
+        except Exception as exc:
+            raise RuntimeError(
+                f"Paramount+ Season {season_number} could not be loaded; refusing a partial Queue Mode catalog."
+            ) from exc
         episode_records.extend(parse_episode_cards(season_page, source_url))
     episode_records = dedupe_records(episode_records)
     start_year, end_year, is_current = series_run_years(values.get("Year", ""), episode_records)

@@ -6,6 +6,11 @@ All notable project changes are documented here. Published entries are derived f
 
 ### Added
 
+- A shared MediaFab Queue Mode contract across Crunchyroll, Disney+, HBO Max, Paramount+, Amazon Prime Video, PBS KIDS, BBC iPlayer, and safely exposed Netflix series catalogs: provider-ID-first matching, one year-qualified series root, local-only episode output, sidecar preservation, collision refusal, and cleanup limited to source folders proven empty.
+- Cross-provider contract tests covering consolidation of separate queue job folders and provider identity taking priority over stale season/episode filename text.
+- BBC iPlayer complete multi-slice catalog assembly, series-root `tvshow.nfo` and artwork, episode PID-first Queue Mode matching, and fail-closed behavior when an advertised slice cannot be loaded.
+- Safe Netflix movie handoff organization and conditional Netflix series Queue Mode, which uses exact public episode IDs and placement only when the public title page exposes an identifiable catalog and otherwise leaves media untouched.
+
 - HBO Max provider for public movie, show, and show-episode catalog pages, including selected title, description, release, exact exposed runtime/language, genre, brand, rating-authority/descriptor, credit, ID, season-count, episode-count, season-ID, complete-guide, trailer, and extra-video metadata.
 - HBO Max title artwork using exactly one series/movie `poster`, `backdrop`, `thumb`, and `logo`, with the selected secondary backdrop in `extrafanart`; episodes receive exactly one landscape `-thumb` and no episode posters or alternate covers.
 - HBO Max Queue Mode catalog enrichment and matching by exact episode UUID or recognized season/episode placement, with UUID priority, local-only NFO/artwork output, safe media/subtitle renaming, year-qualified roots, season organization, collision refusal, and no duration or queue-order guessing.
@@ -47,6 +52,11 @@ All notable project changes are documented here. Published entries are derived f
 - Disney+ portrait poster composition, backdrop, transparent logo, reconstructed 1920-wide episode thumbnails, accessibility/creator fields, and the exact `Disney+ Provider` tag.
 
 ### Changed
+
+- BBC series rename and season organization are enabled by default to match the shared Queue Mode provider standard.
+- Crunchyroll, Disney+, Max, Prime Video, and PBS KIDS transparent logos are byte-checked and converted to genuine PNG when possible, with a truthful source extension retained when conversion is unavailable.
+- Paramount+ refuses a partial Queue Mode catalog when any advertised season page fails to load.
+- Broad MediaFab destinations now exclude already-organized foreign series roots before fallback matching, preventing another show's bare `S01E01` from being claimed.
 
 - Crunchyroll series folders now include provider-derived run years: `Series Title (Year)` for completed single-year runs, `Series Title (Start Year-End Year)` for completed multi-year runs, and `Series Title (Start Year-)` while currently airing, with legacy or stale year-qualified paths migrated atomically rather than nested.
 - Crunchyroll's `yt-dlp`, FFmpeg, and JavaScript-runtime trailer dependencies are explicitly optional and isolated from startup, baseline metadata handling, and every other provider; a missing trailer dependency skips only that optional trailer.
