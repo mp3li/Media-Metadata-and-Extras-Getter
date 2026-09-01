@@ -46,7 +46,6 @@ SHOW_PAGE = """
 <script>var tracking = {"showSeriesId":"61456636"};</script>
 <img alt="SpongeBob SquarePants" src="https://img.example/logo.png">
 <img src="https://img.example/keyart_w3200_landscape.jpg">
-<img src="https://img.example/keyart_w2400_portrait.jpg">
 <div data-media-url="https://splice.paramountplus.com/previewhls/master.m3u8"></div>
 <script>var languages = {"audioLanguages":["English", "Spanish"],"subtitleLanguages":[{"displayName":"English - CC"}]};</script>
 <article class="grid-view-item" data-tracking="x|S1|Ep1|x|Help Wanted||">
@@ -109,7 +108,11 @@ class ParamountPlusProviderTests(unittest.TestCase):
         def fixture(url: str, timeout: int = 25):
             return SHOW_PAGE if url == SHOW_URL else EPISODE_PAGE
 
-        with patch.object(paramountplus, "fetch_text", side_effect=fixture):
+        with patch.object(paramountplus, "fetch_text", side_effect=fixture), patch.object(
+            paramountplus,
+            "paramount_catalog_poster",
+            return_value="https://img.example/catalog-poster_1400x2100.jpg",
+        ):
             return paramountplus.extract_metadata(EPISODE_URL)
 
     def test_playing_page_resolves_parent_show(self):
@@ -119,12 +122,90 @@ class ParamountPlusProviderTests(unittest.TestCase):
         self.assertEqual(item["title"], SHOW)
         self.assertEqual(item["episode_title"], "Help Wanted")
         self.assertEqual((item["season_number"], item["episode_number"]), ("1", "1"))
-        self.assertEqual(item["poster_url"], "https://img.example/keyart_w2400_portrait.jpg")
+        self.assertEqual(item["poster_url"], "https://img.example/catalog-poster_1400x2100.jpg")
         self.assertEqual(item["fanart_url"], "https://img.example/keyart_w3200_landscape.jpg")
         self.assertEqual(item["logo_url"], "https://img.example/logo.png")
         self.assertEqual(item["thumb_url"], "https://thumbnails.cbsig.net/_x/w1920/episode.jpg")
         self.assertEqual(item["series_metadata"]["media_kind"], "series")
         self.assertIn("Paramount+ Provider", item["tags"])
+
+    def test_series_poster_comes_from_matching_portrait_catalog_card(self):
+        catalog_page = (
+            '<script>var collectionConfig = '
+            '[{"title":"All+Shows+A-Z","model":"showMovieHybrid","token":"catalog/token"}];</script>'
+        )
+        catalog_result = """{
+          "success": true,
+          "result": {
+            "total": 1,
+            "data": [{
+              "id": 61456636,
+              "showSeriesId": 61456636,
+              "alt": "SpongeBob SquarePants",
+              "isMovie": false,
+              "orientation": "portrait",
+              "thumb": "https://wwwimage-us.pplusstatic.com/thumbnails/photos/w370-q80/show_asset/poster.jpg?format=webp"
+            }]
+          }
+        }"""
+
+        def fixture(url: str, timeout: int = 25):
+            return catalog_page if url == paramountplus.SERIES_CATALOG_URL else catalog_result
+
+        with patch.object(paramountplus, "fetch_text", side_effect=fixture) as fetch:
+            poster = paramountplus.paramount_catalog_poster(SHOW, "61456636", "series")
+        self.assertEqual(
+            poster,
+            "https://wwwimage-us.pplusstatic.com/thumbnails/photos/w1400-q90/show_asset/poster.jpg?format=webp",
+        )
+        self.assertIn("catalog%2Ftoken", fetch.call_args_list[-1].args[0])
+
+    def test_series_poster_falls_back_to_provider_brand_catalog(self):
+        brand_page = (
+            '<script>var collectionConfig = '
+            '[{"title":"A-Z","model":"showMovieHybrid","token":"brand-token"}];</script>'
+        )
+        brand_result = """{
+          "success": true,
+          "result": {
+            "orientation": "portrait",
+            "total": 1,
+            "data": [{
+              "id": 61457341,
+              "showSeriesId": 61457341,
+              "alt": "Legends of the Hidden Temple",
+              "isMovie": false,
+              "thumb": "https://wwwimage-us.pplusstatic.com/thumbnails/photos/w370-q80/show_asset/legends.jpg?format=webp"
+            }]
+          }
+        }"""
+
+        def fixture(url: str, timeout: int = 25):
+            if url == paramountplus.SERIES_CATALOG_URL:
+                return "<html></html>"
+            if url == "https://www.paramountplus.com/brands/nickelodeon/":
+                return brand_page
+            return brand_result
+
+        with patch.object(paramountplus, "fetch_text", side_effect=fixture):
+            poster = paramountplus.paramount_catalog_poster(
+                "Legends of the Hidden Temple", "61457341", "series", brand="Nickelodeon"
+            )
+        self.assertEqual(
+            poster,
+            "https://wwwimage-us.pplusstatic.com/thumbnails/photos/w1400-q90/show_asset/legends.jpg?format=webp",
+        )
+
+    def test_public_clip_thumbnail_is_not_promoted_to_series_poster(self):
+        page = """
+        <script type="application/ld+json">
+        {"@type":"TVClip","name":"A Clip","description":"Clip description.",
+         "image":"https://img.example/clip_1920x1080.jpg"}
+        </script>
+        """
+        item = paramountplus.clip_metadata_from_page(page, "https://www.paramountplus.com/shows/video/CLIP/")
+        self.assertEqual(item["poster_url"], "")
+        self.assertEqual(item["fanart_url"], "https://img.example/clip_1920x1080.jpg")
 
     def test_show_has_tvshow_metadata_and_run_years(self):
         with patch.object(paramountplus, "fetch_text", return_value=SHOW_PAGE):
@@ -249,6 +330,36 @@ class ParamountPlusProviderTests(unittest.TestCase):
             self.assertFalse(first_source.exists())
             self.assertFalse(second_source.exists())
 
+    def test_exact_file_handoff_escapes_staging_wrapper_and_reuses_existing_output_series(self):
+        meta = base.metadata_from_provider_dict(self.extract_episode())
+        with tempfile.TemporaryDirectory() as temp:
+            output = Path(temp) / "ParamountPlus"
+            staging = output / "SpongeBob SquarePants S01 1080p PMTP"
+            staging.mkdir(parents=True)
+            misplaced = staging / "SpongeBob SquarePants (1999-)"
+            misplaced.mkdir()
+            existing = output / misplaced.name
+            (misplaced / "tvshow.nfo").write_text("existing", encoding="utf-8")
+            video = staging / "capture.mp4"
+            subtitle = staging / "capture.en_us.srt"
+            video.write_bytes(b"video")
+            subtitle.write_text("subtitle", encoding="utf-8")
+
+            with patch.object(base, "download_binary", return_value=None), patch.object(
+                base, "save_paramountplus_series_trailer", return_value=[]
+            ), patch.object(base, "save_paramountplus_extra_videos", return_value=[]):
+                base.save_paramountplus_series_metadata(meta, {}, explicit_folder=str(video))
+
+            stem = "S01E01 SpongeBob SquarePants - Help Wanted"
+            self.assertTrue((existing / "S01" / f"{stem}.mp4").is_file())
+            self.assertTrue((existing / "S01" / f"{stem}.en_us.srt").is_file())
+            self.assertEqual((existing / "tvshow.nfo").read_text(encoding="utf-8"), "existing")
+            self.assertEqual(
+                [path for path in output.iterdir() if path.is_dir() and path.name.startswith("SpongeBob SquarePants (")],
+                [existing],
+            )
+            self.assertFalse(staging.exists())
+
     def test_episode_page_carries_the_complete_parent_catalog(self):
         def fixture(url: str, timeout: int = 25):
             return SHOW_PAGE + SECOND_EPISODE if url == SHOW_URL else EPISODE_PAGE
@@ -261,7 +372,7 @@ class ParamountPlusProviderTests(unittest.TestCase):
         with patch.object(paramountplus, "fetch_text", return_value=SHOW_PAGE + SECOND_EPISODE) as fetch:
             item = paramountplus.show_metadata_from_page(SHOW_PAGE, SHOW_URL, timeout=25)
         self.assertEqual(len(item["series_episodes"]), 2)
-        fetch.assert_called_once_with(SHOW_URL + "episodes/1/", timeout=25)
+        fetch.assert_any_call(SHOW_URL + "episodes/1/", timeout=25)
 
     def test_broad_root_rejects_unrelated_same_episode_number(self):
         meta = base.metadata_from_provider_dict(self.extract_episode())
@@ -337,8 +448,11 @@ class ParamountPlusProviderTests(unittest.TestCase):
             self.assertFalse((root / "Extras" / "Trailers").exists())
 
     def test_movie_handoff_stays_under_supplied_folder_with_source_art_roles(self):
-        item = paramountplus.movie_metadata_from_page(MOVIE_PAGE, MOVIE_URL)
-        self.assertEqual(item["poster_url"], "https://img.example/movie-poster.jpg")
+        with patch.object(
+            paramountplus, "paramount_catalog_poster", return_value="https://img.example/catalog-movie-poster.jpg"
+        ):
+            item = paramountplus.movie_metadata_from_page(MOVIE_PAGE, MOVIE_URL)
+        self.assertEqual(item["poster_url"], "https://img.example/catalog-movie-poster.jpg")
         self.assertEqual(item["fanart_url"], "https://img.example/movie_w1920_pplcrn_backdrop.jpg")
         self.assertEqual(item["gallery_urls"], [])
         self.assertEqual(item["extra_fields"]["Audio"], ["English"])
@@ -374,12 +488,13 @@ class ParamountPlusProviderTests(unittest.TestCase):
             self.assertFalse((root / "Example Movie (2026)-landscape.jpg").exists())
             self.assertEqual(order, ["trailer", "extras"])
 
-    def test_movie_prefers_visible_year_and_rejects_landscape_poster(self):
+    def test_movie_prefers_visible_year_and_does_not_promote_detail_art_to_poster(self):
         page = MOVIE_PAGE.replace(
             "https://img.example/movie-poster.jpg",
             "https://img.example/movie_16.9_1920x1080.jpg",
         ) + '<span class="movie__air-year">1991</span>'
-        item = paramountplus.movie_metadata_from_page(page, MOVIE_URL)
+        with patch.object(paramountplus, "paramount_catalog_poster", return_value=""):
+            item = paramountplus.movie_metadata_from_page(page, MOVIE_URL)
         self.assertEqual(item["year"], "1991")
         self.assertEqual(item["poster_url"], "")
         self.assertEqual(item["fanart_url"], "https://img.example/movie_w1920_pplcrn_backdrop.jpg")
@@ -403,6 +518,7 @@ class ParamountPlusProviderTests(unittest.TestCase):
         with patch.object(paramountplus, "fetch_text", return_value=SHOW_PAGE):
             item = paramountplus.show_metadata_from_page(SHOW_PAGE, SHOW_URL, timeout=25)
         meta = base.metadata_from_provider_dict(item)
+        meta.poster_url = "https://img.example/catalog-poster.webp?format=webp"
         meta.logo_url = "https://img.example/title.webp?format=webp"
         with tempfile.TemporaryDirectory() as temp:
             def fake_download(_url: str, target: Path):

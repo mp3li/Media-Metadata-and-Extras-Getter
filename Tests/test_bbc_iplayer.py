@@ -89,26 +89,34 @@ class BBCQueueModeTests(unittest.TestCase):
         self.assertIn("BBC iPlayer Provider", item["tags"])
         self.assertEqual(item["series_metadata"]["media_kind"], "series")
 
-    def test_queue_ids_outrank_stale_positions_and_use_one_output_root(self):
+    def test_independent_exact_file_handoffs_reuse_one_output_root(self):
         meta = base.metadata_from_provider_dict(self.extract())
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
-            first = root / "job-one"; second = root / "job-two"
-            first.mkdir(); second.mkdir()
-            (first / "S09E09_m0000001.mkv").write_bytes(b"one")
-            (second / "S09E09_m0000003.mkv").write_bytes(b"two")
+            first = root / "S09E09_m0000001.mkv"
+            second = root / "S09E09_m0000003.mkv"
+            unrelated = root / "unrelated.mkv"
+            first.write_bytes(b"one")
+            unrelated.write_bytes(b"unrelated")
 
             def fake_download(_url: str, target: Path):
                 target.parent.mkdir(parents=True, exist_ok=True); target.write_bytes(b"art"); return target
 
             with patch.object(base, "download_binary", side_effect=fake_download):
-                base.save_bbc_queue_series_metadata(meta, {}, explicit_folder=temp)
+                base.save_bbc_queue_series_metadata(meta, {}, explicit_folder=str(first))
+                show = root / "Example Show (2025-)"
+                series_nfo = show / "tvshow.nfo"
+                self.assertTrue((show / "S01" / "S01E01 Example Show - First.mkv").exists())
+                self.assertTrue(series_nfo.exists())
+                series_nfo.write_text("preserve me", encoding="utf-8")
+
+                second.write_bytes(b"two")
+                base.save_bbc_queue_series_metadata(meta, {}, explicit_folder=str(second))
             show = root / "Example Show (2025-)"
-            self.assertTrue((show / "S01" / "S01E01 Example Show - First.mkv").exists())
             self.assertTrue((show / "S02" / "S02E01 Example Show - Return.mkv").exists())
-            self.assertTrue((show / "tvshow.nfo").exists())
-            self.assertFalse(first.exists())
-            self.assertFalse(second.exists())
+            self.assertEqual((show / "tvshow.nfo").read_text(encoding="utf-8"), "preserve me")
+            self.assertTrue(unrelated.exists())
+            self.assertFalse(first.exists()); self.assertFalse(second.exists())
 
     def test_slice_failure_refuses_partial_catalog(self):
         first = state("slice-1", [related_episode("m0000001", 1, 1, "First", "2025-01-01")])

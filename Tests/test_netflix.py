@@ -66,24 +66,34 @@ class NetflixProviderTests(unittest.TestCase):
         self.assertEqual(item["series_episodes"][0]["id"], "80000001")
         self.assertIn("Netflix Provider", item["tags"])
 
-    def test_queue_ids_outrank_stale_positions_and_consolidate_jobs(self):
+    def test_independent_exact_file_handoffs_reuse_one_output_root(self):
         with patch.object(netflix, "fetch_text", return_value=html_page(SERIES)):
             meta = base.metadata_from_provider_dict(netflix.extract_metadata(SERIES_URL))
         with tempfile.TemporaryDirectory() as temp:
-            root = Path(temp); first = root / "job-1"; second = root / "job-2"
-            first.mkdir(); second.mkdir()
-            (first / "S09E09_80000001.mkv").write_bytes(b"one")
-            (second / "S09E09_80000002.mkv").write_bytes(b"two")
+            root = Path(temp)
+            first = root / "S09E09_80000001.mkv"
+            second = root / "S09E09_80000002.mkv"
+            unrelated = root / "unrelated.mkv"
+            first.write_bytes(b"one")
+            unrelated.write_bytes(b"unrelated")
 
             def fake_download(_url: str, target: Path):
                 target.parent.mkdir(parents=True, exist_ok=True); target.write_bytes(b"art"); return target
 
             with patch.object(base, "download_binary", side_effect=fake_download):
-                base.save_netflix_series_metadata(meta, {}, explicit_folder=temp)
+                base.save_netflix_series_metadata(meta, {}, explicit_folder=str(first))
+                show = root / "Example Show (2025)"
+                series_nfo = show / "tvshow.nfo"
+                self.assertTrue((show / "S01" / "S01E01 Example Show - Beginning.mkv").exists())
+                self.assertTrue(series_nfo.exists())
+                series_nfo.write_text("preserve me", encoding="utf-8")
+
+                second.write_bytes(b"two")
+                base.save_netflix_series_metadata(meta, {}, explicit_folder=str(second))
             show = root / "Example Show (2025)"
-            self.assertTrue((show / "S01" / "S01E01 Example Show - Beginning.mkv").exists())
             self.assertTrue((show / "S01" / "S01E02 Example Show - Return.mkv").exists())
-            self.assertTrue((show / "tvshow.nfo").exists())
+            self.assertEqual((show / "tvshow.nfo").read_text(encoding="utf-8"), "preserve me")
+            self.assertTrue(unrelated.exists())
             self.assertFalse(first.exists()); self.assertFalse(second.exists())
 
     def test_series_without_public_catalog_fails_closed(self):

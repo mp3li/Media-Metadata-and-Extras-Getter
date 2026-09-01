@@ -22,7 +22,7 @@ import xml.etree.ElementTree as ET
 from dataclasses import dataclass, field
 from html import escape
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 
 
 TOOL_NAME = "Media Metadata and Extras Getter by mp3li"
@@ -710,24 +710,117 @@ def safe_filename(text: str) -> str:
     return value or "Untitled"
 
 
-def explicit_series_show_folder(
+def series_title_without_year(folder_name: str) -> str:
+    return re.sub(r" \(\d{4}(?:-(?:\d{4})?)?\)$", "", clean_text(folder_name))
+
+
+def matching_series_folders(output_root: Path, title: str, desired_name: str) -> list[Path]:
+    """Find an existing series root without allowing a second year-suffixed copy."""
+    if not output_root.is_dir():
+        return []
+    title_key = normalize_match_key(title)
+    desired_key = normalize_match_key(desired_name)
+    matches = [
+        child.resolve()
+        for child in output_root.iterdir()
+        if child.is_dir()
+        and not child.is_symlink()
+        and normalize_match_key(series_title_without_year(child.name)) == title_key
+    ]
+    return sorted(
+        matches,
+        key=lambda child: (
+            normalize_match_key(child.name) != desired_key,
+            not (child / "tvshow.nfo").is_file(),
+            child.name.casefold(),
+        ),
+    )
+
+
+def nested_matching_series_folders(output_root: Path, title: str) -> list[Path]:
+    """Find an accidentally nested canonical series root beneath one provider output."""
+    if not output_root.is_dir():
+        return []
+    title_key = normalize_match_key(title)
+    matches: list[Path] = []
+    for child in output_root.rglob("*"):
+        if not child.is_dir() or child.is_symlink() or child.parent == output_root:
+            continue
+        if normalize_match_key(series_title_without_year(child.name)) != title_key:
+            continue
+        if (child / "tvshow.nfo").is_file() or re.search(
+            r" \(\d{4}(?:-(?:\d{4})?)?\)$", child.name
+        ):
+            matches.append(child.resolve())
+    return sorted(set(matches), key=lambda child: (len(child.parts), child.name.casefold()))
+
+
+def reusable_output_series_folder(output_root: Path, title: str, desired_name: str) -> Path:
+    direct = matching_series_folders(output_root, title, desired_name)
+    if direct:
+        if len(direct) > 1 and normalize_match_key(direct[0].name) != normalize_match_key(desired_name):
+            raise FileExistsError(
+                f"More than one existing {title} series folder was found in {output_root}; "
+                "MME will not create or guess another destination."
+            )
+        return direct[0]
+
+    nested = nested_matching_series_folders(output_root, title)
+    if len(nested) > 1:
+        raise FileExistsError(
+            f"More than one nested {title} series folder was found in {output_root}; "
+            "MME will not create or guess another destination."
+        )
+    if nested:
+        canonical = output_root / nested[0].name
+        if canonical.exists():
+            raise FileExistsError(f"Series destination already exists: {canonical}")
+        nested[0].rename(canonical)
+        return canonical
+    return output_root / desired_name
+
+
+def provider_handoff_show_folder(
     explicit_folder: str,
     meta: Metadata,
-    series_folder_name: Callable[[Metadata], str],
+    desired_name: str,
+    provider_folder_names: set[str],
 ) -> Path | None:
-    """Resolve one canonical series root beneath the exact MediaFab handoff location."""
+    """Resolve a library root from one exact handoff file, independently of its staging folder."""
     if not clean_text(explicit_folder):
         return None
     supplied = Path(explicit_folder).expanduser().resolve()
-    root = supplied.parent if supplied.is_file() or supplied.suffix.casefold() in VIDEO_EXTENSIONS else supplied
-    desired = series_folder_name(meta)
-    if normalize_match_key(root.name) == normalize_match_key(desired):
-        return root
+    source = supplied.parent if supplied.is_file() or supplied.suffix.casefold() in VIDEO_EXTENSIONS else supplied
+    if re.fullmatch(r"S\d{1,2}", source.name, re.IGNORECASE):
+        source = source.parent
+
     title = safe_filename(meta.show_title or meta.title)
-    root_title = re.sub(r" \(\d{4}(?:-(?:\d{4})?)?\)$", "", root.name)
-    if normalize_match_key(root_title) == normalize_match_key(title):
-        return root.parent / desired
-    return root / desired
+    title_key = normalize_match_key(title)
+    desired_key = normalize_match_key(desired_name)
+    provider_keys = {normalize_match_key(value) for value in provider_folder_names}
+
+    # A later episode may already be inside the canonical series root. Reuse it
+    # even when the provider's open/closed year range has changed since episode one.
+    for candidate in (source, *source.parents):
+        candidate_title = normalize_match_key(series_title_without_year(candidate.name))
+        if candidate_title == title_key and (
+            normalize_match_key(candidate.name) == desired_key
+            or (candidate / "tvshow.nfo").is_file()
+            or bool(re.search(r" \(\d{4}(?:-(?:\d{4})?)?\)$", candidate.name))
+        ):
+            return candidate
+        if normalize_match_key(candidate.name) in provider_keys:
+            return reusable_output_series_folder(candidate, title, desired_name)
+
+    # Some downloaders create a title/season/quality wrapper beneath an otherwise
+    # generic output folder. That wrapper is a staging source, not the library root.
+    source_key = normalize_match_key(series_title_without_year(source.name))
+    if title_key and title_key in source_key and source_key != title_key:
+        existing = matching_series_folders(source.parent, title, desired_name)
+        return existing[0] if existing else source.parent / desired_name
+
+    existing = matching_series_folders(source, title, desired_name)
+    return existing[0] if existing else source / desired_name
 
 
 def candidate_is_in_foreign_series_root(video: Path, explicit_folder: str, wanted_title: str) -> bool:
@@ -768,33 +861,6 @@ def local_episode_sidecars(video: Path) -> list[Path]:
         ):
             output.append(sidecar)
     return sorted(output)
-
-
-def cleanup_empty_provider_source_folders(
-    folders: set[Path], canonical_show_folder: Path | None, provider_name: str
-) -> list[Path]:
-    """Remove only matched source folders proven empty after successful organization."""
-    removed: list[Path] = []
-    canonical = canonical_show_folder.resolve() if canonical_show_folder else None
-    for folder in sorted({path.resolve() for path in folders}, key=lambda path: len(path.parts), reverse=True):
-        if not folder.is_dir() or folder.is_symlink():
-            continue
-        if canonical and (folder == canonical or canonical in folder.parents):
-            continue
-        entries = list(folder.iterdir())
-        if any(entry.name != ".DS_Store" for entry in entries):
-            continue
-        ds_store = folder / ".DS_Store"
-        if ds_store.exists() and ds_store.is_file() and not ds_store.is_symlink():
-            ds_store.unlink()
-        try:
-            folder.rmdir()
-        except OSError:
-            continue
-        removed.append(folder)
-    if removed:
-        print(f"{provider_name} cleanup removed {len(removed)} empty source folder(s).")
-    return removed
 
 
 def default_folder_name(meta: Metadata) -> str:
@@ -1371,18 +1437,28 @@ def bbc_queue_target_base(meta: Metadata, group: BBCMediaGroup) -> str:
     return safe_filename(value)
 
 
+def bbc_queue_show_folder(folder: Path, meta: Metadata) -> Path:
+    resolved = folder.resolve()
+    root = resolved.parent if re.fullmatch(r"S\d{1,2}", resolved.name, re.IGNORECASE) else resolved
+    desired = bbc_queue_series_folder_name(meta)
+    if normalize_match_key(root.name) == normalize_match_key(desired):
+        return root
+    title = safe_filename(meta.show_title or meta.title)
+    root_title = re.sub(r" \(\d{4}(?:-(?:\d{4})?)?\)$", "", root.name)
+    if normalize_match_key(root_title) == normalize_match_key(title):
+        return root.parent / desired
+    return root / desired
+
+
 def prepare_bbc_queue_media_group(
-    meta: Metadata,
-    group: BBCMediaGroup,
-    settings: dict[str, Any],
-    explicit_show_folder: Path | None,
+    meta: Metadata, group: BBCMediaGroup, settings: dict[str, Any]
 ) -> BBCMediaGroup:
     rename = bool(settings.get("bbc_series_rename_enabled", True))
     organize = bool(settings.get("bbc_series_organize_enabled", True))
     if not (rename or organize):
         return group
     destination = (
-        (explicit_show_folder or group.folder / bbc_queue_series_folder_name(meta)) / f"S{group.season:02d}"
+        bbc_queue_show_folder(group.folder, meta) / f"S{group.season:02d}"
         if organize else group.folder
     )
     base = bbc_queue_target_base(meta, group) if rename else group.stem
@@ -1474,16 +1550,15 @@ def save_bbc_queue_series_metadata(
     matches = bbc_queue_media_groups(meta, settings, explicit_folder)
     if not matches:
         return []
-    explicit_show_folder = explicit_series_show_folder(explicit_folder, meta, bbc_queue_series_folder_name)
-    source_folders = {group.folder for group, _record in matches}
     saved: list[Path] = []
-    bundled = False
+    bundled: set[Path] = set()
     for group, record in matches:
         episode_meta = bbc_queue_episode_metadata(meta, record)
-        prepared = prepare_bbc_queue_media_group(episode_meta, group, settings, explicit_show_folder)
-        show_folder = explicit_show_folder or prepared.folder.parent
-        if not bundled:
-            saved.extend(save_bbc_queue_series_bundle(meta, show_folder)); bundled = True
+        prepared = prepare_bbc_queue_media_group(episode_meta, group, settings)
+        show_folder = bbc_queue_show_folder(prepared.folder, episode_meta)
+        if show_folder not in bundled:
+            saved.extend(save_bbc_queue_series_bundle(meta, show_folder))
+            bundled.add(show_folder)
         video = next((path for path in prepared.files if path.suffix.casefold() in VIDEO_EXTENSIONS), None)
         if not video:
             continue
@@ -1495,7 +1570,6 @@ def save_bbc_queue_series_metadata(
             path = download_binary(episode_meta.thumb_url, thumb)
             if path:
                 saved.append(path)
-    cleanup_empty_provider_source_folders(source_folders, explicit_show_folder, bbc_iplayer.NAME)
     print(f"BBC iPlayer Queue Mode found {len(matches)} local episode(s) and saved {len(saved)} item(s).")
     return saved
 
@@ -1508,6 +1582,19 @@ def netflix_series_folder_name(meta: Metadata) -> str:
         return title
     years = f"{start}-" if meta.series_is_current else (start if not end or end == start else f"{start}-{end}")
     return safe_filename(f"{title} ({years})")
+
+
+def netflix_show_folder(folder: Path, meta: Metadata) -> Path:
+    resolved = folder.resolve()
+    root = resolved.parent if re.fullmatch(r"S\d{1,2}", resolved.name, re.IGNORECASE) else resolved
+    desired = netflix_series_folder_name(meta)
+    if normalize_match_key(root.name) == normalize_match_key(desired):
+        return root
+    title = safe_filename(meta.show_title or meta.title)
+    root_title = re.sub(r" \(\d{4}(?:-(?:\d{4})?)?\)$", "", root.name)
+    if normalize_match_key(root_title) == normalize_match_key(title):
+        return root.parent / desired
+    return root / desired
 
 
 def netflix_media_groups(
@@ -1600,13 +1687,12 @@ def save_netflix_series_metadata(
     matches = netflix_media_groups(meta, settings, explicit_folder)
     if not matches:
         return []
-    show_folder = explicit_series_show_folder(explicit_folder, meta, netflix_series_folder_name)
-    source_folders = {group.folder for group, _record in matches}
     saved: list[Path] = []
-    bundled = False
+    bundled: set[Path] = set()
     for group, record in matches:
         episode_meta = netflix_episode_metadata(meta, record)
-        destination = (show_folder or group.folder / netflix_series_folder_name(meta)) / f"S{group.season:02d}"
+        show_folder = netflix_show_folder(group.folder, meta)
+        destination = show_folder / f"S{group.season:02d}"
         base = safe_filename(
             f"S{group.season:02d}E{group.episode:02d} {meta.title}"
             + (f" - {episode_meta.episode_title}" if episode_meta.episode_title else "")
@@ -1621,8 +1707,8 @@ def save_netflix_series_metadata(
             temporary = source.with_name(f".netflix-queue-{index}-{source.name}")
             source.rename(temporary); temporary.rename(target)
         video = next((target for _source, target in targets if target.suffix.casefold() in VIDEO_EXTENSIONS), None)
-        canonical = show_folder or destination.parent
-        if not bundled:
+        canonical = show_folder
+        if canonical not in bundled:
             canonical.mkdir(parents=True, exist_ok=True)
             nfo = canonical / "tvshow.nfo"
             if not nfo.exists():
@@ -1634,7 +1720,7 @@ def save_netflix_series_metadata(
                         path = download_binary(url, target)
                         if path:
                             saved.append(path)
-            bundled = True
+            bundled.add(canonical)
         if not video:
             continue
         episode_nfo = video.with_suffix(".nfo")
@@ -1645,13 +1731,13 @@ def save_netflix_series_metadata(
             path = download_binary(episode_meta.thumb_url, thumb)
             if path:
                 saved.append(path)
-    canonical = show_folder or next(iter(matches))[0].folder / netflix_series_folder_name(meta)
-    if meta.trailer_url:
+    for canonical in bundled:
+        if not meta.trailer_url:
+            continue
         trailer_dir = canonical / "trailers"; trailer_dir.mkdir(parents=True, exist_ok=True)
         trailer = download_binary(meta.trailer_url, trailer_dir / "trailer.mp4")
         if trailer:
             saved.append(trailer)
-    cleanup_empty_provider_source_folders(source_folders, show_folder, netflix.NAME)
     print(f"Netflix Queue Mode found {len(matches)} local episode(s) and saved {len(saved)} item(s).")
     return saved
 
@@ -1795,20 +1881,17 @@ def crunchyroll_subtitle_role(path: Path, sibling_cue_counts: list[int] | None =
 
 
 def prepare_crunchyroll_media_group(
-    meta: Metadata,
-    group: CrunchyrollMediaGroup,
-    settings: dict[str, Any],
-    explicit_show_folder: Path | None = None,
+    meta: Metadata, group: CrunchyrollMediaGroup, settings: dict[str, Any]
 ) -> CrunchyrollMediaGroup:
     rename = bool(settings.get("crunchyroll_series_rename_enabled", True))
     organize = bool(settings.get("crunchyroll_series_organize_enabled", True))
     if not (rename or organize):
         return group
-    if organize and explicit_show_folder is None:
+    if organize:
         group = migrate_crunchyroll_series_folder(group, meta)
     season_folder = f"S{group.season:02d}"
     destination = (
-        (explicit_show_folder or crunchyroll_show_folder(group.folder, meta)) / season_folder
+        crunchyroll_show_folder(group.folder, meta) / season_folder
         if organize
         else group.folder
     )
@@ -2101,8 +2184,6 @@ def save_crunchyroll_series_metadata(
     saved: list[Path] = []
     artwork_saved_for: set[Path] = set()
     trailer_meta_for: dict[Path, Metadata] = {}
-    explicit_show_folder = explicit_series_show_folder(explicit_folder, meta, crunchyroll_series_folder_name)
-    source_folders = {group.folder for group, _record in matches}
     for group, record in matches:
         episode_id = clean_text(record.get("id"))
         if (
@@ -2123,10 +2204,8 @@ def save_crunchyroll_series_metadata(
         episode_meta.show_title = meta.show_title or meta.title
         episode_meta.season_number = str(group.season)
         episode_meta.episode_number = str(group.episode)
-        prepared = prepare_crunchyroll_media_group(
-            episode_meta, group, settings, explicit_show_folder=explicit_show_folder
-        )
-        show_folder = explicit_show_folder or crunchyroll_show_folder(prepared.folder, episode_meta)
+        prepared = prepare_crunchyroll_media_group(episode_meta, group, settings)
+        show_folder = crunchyroll_show_folder(prepared.folder, episode_meta)
         if show_folder not in artwork_saved_for:
             saved.extend(ensure_crunchyroll_series_bundle(episode_meta, show_folder))
             artwork_saved_for.add(show_folder)
@@ -2146,7 +2225,6 @@ def save_crunchyroll_series_metadata(
                 saved.append(downloaded)
     for show_folder, episode_meta in trailer_meta_for.items():
         saved.extend(save_crunchyroll_series_trailer(episode_meta, show_folder))
-    cleanup_empty_provider_source_folders(source_folders, explicit_show_folder, crunchyroll.NAME)
     print(f"Crunchyroll series mode found {len(matches)} local episode(s) and saved {len(saved)} item(s).")
     return saved
 
@@ -2276,19 +2354,16 @@ def migrate_disneyplus_series_folder(group: DisneyPlusMediaGroup, meta: Metadata
 
 
 def prepare_disneyplus_media_group(
-    meta: Metadata,
-    group: DisneyPlusMediaGroup,
-    settings: dict[str, Any],
-    explicit_show_folder: Path | None = None,
+    meta: Metadata, group: DisneyPlusMediaGroup, settings: dict[str, Any]
 ) -> DisneyPlusMediaGroup:
     rename = bool(settings.get("disneyplus_series_rename_enabled", True))
     organize = bool(settings.get("disneyplus_series_organize_enabled", True))
     if not (rename or organize):
         return group
-    if organize and explicit_show_folder is None:
+    if organize:
         group = migrate_disneyplus_series_folder(group, meta)
     destination = (
-        (explicit_show_folder or disneyplus_show_folder(group.folder, meta)) / f"S{group.season:02d}"
+        disneyplus_show_folder(group.folder, meta) / f"S{group.season:02d}"
         if organize else group.folder
     )
     base = disneyplus_target_base(meta, group) if rename else group.stem
@@ -2402,8 +2477,6 @@ def save_disneyplus_series_metadata(
     saved: list[Path] = []
     bundled: set[Path] = set()
     trailer_meta_for: dict[Path, Metadata] = {}
-    explicit_show_folder = explicit_series_show_folder(explicit_folder, meta, disneyplus_series_folder_name)
-    source_folders = {group.folder for group, _record in matches}
     for group, record in matches:
         episode_meta = meta if (
             meta.media_kind.casefold() == "episode"
@@ -2412,10 +2485,8 @@ def save_disneyplus_series_metadata(
         ) else disneyplus_episode_metadata(meta, record)
         episode_meta.season_number = str(group.season)
         episode_meta.episode_number = str(group.episode)
-        prepared = prepare_disneyplus_media_group(
-            episode_meta, group, settings, explicit_show_folder=explicit_show_folder
-        )
-        show_folder = explicit_show_folder or disneyplus_show_folder(prepared.folder, episode_meta)
+        prepared = prepare_disneyplus_media_group(episode_meta, group, settings)
+        show_folder = disneyplus_show_folder(prepared.folder, episode_meta)
         if show_folder not in bundled:
             saved.extend(ensure_disneyplus_series_bundle(meta if meta.media_kind.casefold() == "series" else episode_meta, show_folder))
             bundled.add(show_folder)
@@ -2436,7 +2507,6 @@ def save_disneyplus_series_metadata(
     for show_folder, trailer_meta in trailer_meta_for.items():
         series_meta = metadata_from_provider_dict(trailer_meta.series_metadata) if trailer_meta.series_metadata else trailer_meta
         saved.extend(save_disneyplus_series_trailer(series_meta, show_folder))
-    cleanup_empty_provider_source_folders(source_folders, explicit_show_folder, disneyplus.NAME)
     print(f"Disney+ series mode found {len(matches)} local episode(s) and saved {len(saved)} item(s).")
     return saved
 
@@ -2544,17 +2614,14 @@ def hbomax_show_folder(folder: Path, meta: Metadata) -> Path:
 
 
 def prepare_hbomax_media_group(
-    meta: Metadata,
-    group: HBOMaxMediaGroup,
-    settings: dict[str, Any],
-    explicit_show_folder: Path | None = None,
+    meta: Metadata, group: HBOMaxMediaGroup, settings: dict[str, Any]
 ) -> HBOMaxMediaGroup:
     rename = bool(settings.get("hbomax_series_rename_enabled", True))
     organize = bool(settings.get("hbomax_series_organize_enabled", True))
     if not (rename or organize):
         return group
     destination = (
-        (explicit_show_folder or hbomax_show_folder(group.folder, meta)) / f"S{group.season:02d}"
+        hbomax_show_folder(group.folder, meta) / f"S{group.season:02d}"
         if organize else group.folder
     )
     base = hbomax_target_base(meta, group) if rename else group.stem
@@ -2878,16 +2945,12 @@ def save_hbomax_series_metadata(
     if not matches:
         return []
     saved: list[Path] = []; bundled: set[Path] = set(); trailer_for: dict[Path, Metadata] = {}
-    explicit_show_folder = explicit_series_show_folder(explicit_folder, meta, hbomax_series_folder_name)
-    source_folders = {group.folder for group, _record in matches}
     for group, record in matches:
         episode_meta = meta if (
             meta.media_kind.casefold() == "episode" and meta.season_number == str(group.season) and meta.episode_number == str(group.episode)
         ) else hbomax_episode_metadata(meta, record)
-        prepared = prepare_hbomax_media_group(
-            episode_meta, group, settings, explicit_show_folder=explicit_show_folder
-        )
-        show_folder = explicit_show_folder or hbomax_show_folder(prepared.folder, episode_meta)
+        prepared = prepare_hbomax_media_group(episode_meta, group, settings)
+        show_folder = hbomax_show_folder(prepared.folder, episode_meta)
         if show_folder not in bundled:
             saved.extend(ensure_hbomax_series_bundle(meta if meta.media_kind.casefold() == "series" else episode_meta, show_folder)); bundled.add(show_folder)
         trailer_for[show_folder] = hbomax_parent_series_meta(meta if meta.media_kind.casefold() == "series" else episode_meta)
@@ -2905,7 +2968,6 @@ def save_hbomax_series_metadata(
     for folder, series in trailer_for.items():
         saved.extend(save_hbomax_trailer(series, folder))
         saved.extend(save_hbomax_extra_videos(series, folder))
-    cleanup_empty_provider_source_folders(source_folders, explicit_show_folder, hbomax.NAME)
     print(f"HBO Max series mode found {len(matches)} local episode(s) and saved {len(saved)} item(s).")
     return saved
 
@@ -3058,19 +3120,16 @@ def migrate_amazon_prime_series_folder(group: AmazonPrimeMediaGroup, meta: Metad
 
 
 def prepare_amazon_prime_media_group(
-    meta: Metadata,
-    group: AmazonPrimeMediaGroup,
-    settings: dict[str, Any],
-    explicit_show_folder: Path | None = None,
+    meta: Metadata, group: AmazonPrimeMediaGroup, settings: dict[str, Any]
 ) -> AmazonPrimeMediaGroup:
     rename = bool(settings.get("amazon_prime_series_rename_enabled", True))
     organize = bool(settings.get("amazon_prime_series_organize_enabled", True))
     if not (rename or organize):
         return group
-    if organize and explicit_show_folder is None:
+    if organize:
         group = migrate_amazon_prime_series_folder(group, meta)
     destination = (
-        (explicit_show_folder or amazon_prime_show_folder(group.folder, meta)) / f"S{group.season:02d}"
+        amazon_prime_show_folder(group.folder, meta) / f"S{group.season:02d}"
         if organize else group.folder
     )
     base = amazon_prime_target_base(meta, group) if rename else group.stem
@@ -3387,18 +3446,14 @@ def save_amazon_prime_series_metadata(
     saved: list[Path] = []
     bundled: set[Path] = set()
     trailer_meta_for: dict[Path, Metadata] = {}
-    explicit_show_folder = explicit_series_show_folder(explicit_folder, meta, amazon_prime_series_folder_name)
-    source_folders = {group.folder for group, _record in matches}
     for group, record in matches:
         episode_meta = meta if (
             meta.media_kind.casefold() == "episode"
             and meta.season_number == str(group.season)
             and meta.episode_number == str(group.episode)
         ) else amazon_prime_episode_metadata(meta, record)
-        prepared = prepare_amazon_prime_media_group(
-            episode_meta, group, settings, explicit_show_folder=explicit_show_folder
-        )
-        show_folder = explicit_show_folder or amazon_prime_show_folder(prepared.folder, episode_meta)
+        prepared = prepare_amazon_prime_media_group(episode_meta, group, settings)
+        show_folder = amazon_prime_show_folder(prepared.folder, episode_meta)
         if show_folder not in bundled:
             saved.extend(ensure_amazon_prime_series_bundle(meta if meta.media_kind.casefold() == "series" else episode_meta, show_folder))
             bundled.add(show_folder)
@@ -3420,7 +3475,6 @@ def save_amazon_prime_series_metadata(
                 saved.append(path)
     for show_folder, series_meta in trailer_meta_for.items():
         saved.extend(save_amazon_prime_series_trailer(series_meta, show_folder))
-    cleanup_empty_provider_source_folders(source_folders, explicit_show_folder, amazon.PRIME_NAME)
     print(f"Amazon Prime Video series mode found {len(matches)} local episode(s) and saved {len(saved)} item(s).")
     return saved
 
@@ -3560,17 +3614,14 @@ def pbs_kids_show_folder(folder: Path, meta: Metadata) -> Path:
 
 
 def prepare_pbs_kids_media_group(
-    meta: Metadata,
-    group: PBSKidsMediaGroup,
-    settings: dict[str, Any],
-    explicit_show_folder: Path | None = None,
+    meta: Metadata, group: PBSKidsMediaGroup, settings: dict[str, Any]
 ) -> PBSKidsMediaGroup:
     rename = bool(settings.get("pbs_kids_series_rename_enabled", True))
     organize = bool(settings.get("pbs_kids_series_organize_enabled", True))
     if not (rename or organize):
         return group
     destination = (
-        (explicit_show_folder or pbs_kids_show_folder(group.folder, meta)) / f"S{group.season:02d}"
+        pbs_kids_show_folder(group.folder, meta) / f"S{group.season:02d}"
         if organize else group.folder
     )
     base = pbs_kids_target_base(meta, group) if rename else group.stem
@@ -3727,17 +3778,13 @@ def save_pbs_kids_series_metadata(
         return []
     saved: list[Path] = []
     bundled: set[Path] = set()
-    explicit_show_folder = explicit_series_show_folder(explicit_folder, meta, pbs_kids_series_folder_name)
-    source_folders = {group.folder for group, _record in matches}
     for group, record in matches:
         episode_meta = pbs_kids_episode_metadata(meta, record)
-        prepared = prepare_pbs_kids_media_group(
-            episode_meta, group, settings, explicit_show_folder=explicit_show_folder
-        )
+        prepared = prepare_pbs_kids_media_group(episode_meta, group, settings)
         video = next((path for path in prepared.files if path.suffix.casefold() in VIDEO_EXTENSIONS), None)
         if not video:
             continue
-        show_folder = explicit_show_folder or pbs_kids_show_folder(prepared.folder, episode_meta)
+        show_folder = pbs_kids_show_folder(prepared.folder, episode_meta)
         if show_folder not in bundled:
             saved.extend(ensure_pbs_kids_series_bundle(meta, show_folder))
             bundled.add(show_folder)
@@ -3751,7 +3798,6 @@ def save_pbs_kids_series_metadata(
             path = download_binary(episode_meta.thumb_url, thumb)
             if path:
                 saved.append(path)
-    cleanup_empty_provider_source_folders(source_folders, explicit_show_folder, pbs_kids.NAME)
     print(f"PBS KIDS series mode found {len(matches)} local episode(s) and saved {len(saved)} item(s).")
     cleanup_pbs_kids_handoff_folders(explicit_folder)
     return saved
@@ -3894,11 +3940,12 @@ def paramountplus_show_folder(folder: Path, meta: Metadata) -> Path:
 
 
 def paramountplus_explicit_show_folder(explicit_folder: str, meta: Metadata) -> Path | None:
-    if not clean_text(explicit_folder):
-        return None
-    supplied = Path(explicit_folder).expanduser().resolve()
-    root = supplied.parent if supplied.is_file() or supplied.suffix.casefold() in VIDEO_EXTENSIONS else supplied
-    return paramountplus_show_folder(root, meta)
+    return provider_handoff_show_folder(
+        explicit_folder,
+        meta,
+        paramountplus_series_folder_name(meta),
+        {"ParamountPlus", "Paramount+", "Paramount Plus"},
+    )
 
 
 def migrate_paramountplus_series_folder(
@@ -4898,6 +4945,17 @@ def run_handoff(args: argparse.Namespace, settings: dict[str, Any]) -> int:
     if not detail_link:
         print("A detail link is required for --handoff.")
         return 1
+    media_value = clean_text(args.media_folder)
+    if not media_value:
+        print("An exact completed video file is required for --media-folder when using --handoff.")
+        return 1
+    media_file = Path(media_value).expanduser().resolve()
+    if not media_file.is_file() or media_file.suffix.casefold() not in VIDEO_EXTENSIONS:
+        print(
+            "--handoff requires --media-folder to be the exact completed video file. "
+            "Use the normal manual/import workflow for directory processing."
+        )
+        return 1
     try:
         with AnimatedStatus("Creating your .nfo file and grabbing your trailer/images"):
             meta = scrape_url(detail_link)
@@ -4906,13 +4964,13 @@ def run_handoff(args: argparse.Namespace, settings: dict[str, Any]) -> int:
                 detail_link,
                 settings,
                 skip_existing=bool(args.skip_existing),
-                explicit_folder=clean_text(args.media_folder),
+                explicit_folder=str(media_file),
             )
             if saved is None:
                 saved = save_metadata_bundle(
                     meta,
                     settings,
-                    explicit_folder=clean_text(args.media_folder),
+                    explicit_folder=str(media_file),
                     skip_existing=bool(args.skip_existing),
                 )
     except UnsupportedProviderError as exc:

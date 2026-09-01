@@ -6,8 +6,8 @@ All notable project changes are documented here. Published entries are derived f
 
 ### Added
 
-- A shared MediaFab Queue Mode contract across Crunchyroll, Disney+, HBO Max, Paramount+, Amazon Prime Video, PBS KIDS, BBC iPlayer, and safely exposed Netflix series catalogs: provider-ID-first matching, one year-qualified series root, local-only episode output, sidecar preservation, collision refusal, and cleanup limited to source folders proven empty.
-- Cross-provider contract tests covering consolidation of separate queue job folders and provider identity taking priority over stale season/episode filename text.
+- A shared per-download MediaFab handoff contract across Crunchyroll, Disney+, HBO Max, Paramount+, Amazon Prime Video, PBS KIDS, BBC iPlayer, and safely exposed Netflix series catalogs: one exact completed video per invocation, provider-ID-first matching, immediate organization, reusable year-qualified series roots, local-only episode output, sidecar preservation, and collision refusal.
+- Cross-provider contract tests covering two independent exact-file handoffs reusing one series root, preserving existing series metadata, leaving unrelated files untouched, and provider identity taking priority over stale season/episode filename text.
 - BBC iPlayer complete multi-slice catalog assembly, series-root `tvshow.nfo` and artwork, episode PID-first Queue Mode matching, and fail-closed behavior when an advertised slice cannot be loaded.
 - Safe Netflix movie handoff organization and conditional Netflix series Queue Mode, which uses exact public episode IDs and placement only when the public title page exposes an identifiable catalog and otherwise leaves media untouched.
 
@@ -53,6 +53,9 @@ All notable project changes are documented here. Published entries are derived f
 
 ### Changed
 
+- Restored Crunchyroll, Paramount+, PBS KIDS, and Disney+'s pre-normalization per-download behavior as the provider standard, removed shared queue-root routing from exact-file handoffs, and applied the same immediate exact-file behavior to Max, Prime Video, BBC iPlayer, and Netflix.
+- Paramount+ exact-file handoffs now distinguish a downloader-created title/season/quality staging wrapper from the selected provider output root, reuse the one existing title-matched series folder there, promote a previously nested series root back to the provider output, and refuse ambiguous roots instead of creating duplicates.
+- `--handoff` now requires `--media-folder` to identify one existing completed video file. Directory and multi-file processing remain available only through the separate manual/import workflow.
 - BBC series rename and season organization are enabled by default to match the shared Queue Mode provider standard.
 - Crunchyroll, Disney+, Max, Prime Video, and PBS KIDS transparent logos are byte-checked and converted to genuine PNG when possible, with a truthful source extension retained when conversion is unavailable.
 - Paramount+ refuses a partial Queue Mode catalog when any advertised season page fails to load.

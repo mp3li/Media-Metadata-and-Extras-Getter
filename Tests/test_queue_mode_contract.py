@@ -4,7 +4,9 @@ import importlib.util
 import sys
 import tempfile
 import unittest
+from argparse import Namespace
 from pathlib import Path
+from unittest.mock import patch
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -23,38 +25,69 @@ base = load_base()
 
 
 class QueueModeContractTests(unittest.TestCase):
-    def test_series_providers_consolidate_jobs_and_preserve_generated_sidecars(self):
+    def test_series_providers_process_two_exact_files_and_reuse_one_series_root(self):
         cases = [
             ("Crunchyroll", base.CrunchyrollMediaGroup, base.prepare_crunchyroll_media_group, base.crunchyroll_series_folder_name),
             ("Disney+", base.DisneyPlusMediaGroup, base.prepare_disneyplus_media_group, base.disneyplus_series_folder_name),
             ("HBO Max", base.HBOMaxMediaGroup, base.prepare_hbomax_media_group, base.hbomax_series_folder_name),
             ("Amazon Prime Video", base.AmazonPrimeMediaGroup, base.prepare_amazon_prime_media_group, base.amazon_prime_series_folder_name),
             ("PBS KIDS", base.PBSKidsMediaGroup, base.prepare_pbs_kids_media_group, base.pbs_kids_series_folder_name),
+            ("Paramount+", base.ParamountPlusMediaGroup, base.prepare_paramountplus_media_group, base.paramountplus_series_folder_name),
         ]
         for provider, group_type, prepare, folder_name in cases:
             with self.subTest(provider=provider), tempfile.TemporaryDirectory() as temp:
-                root = Path(temp); first = root / "job-one"; second = root / "job-two"
-                first.mkdir(); second.mkdir()
+                root = Path(temp).resolve()
                 meta = base.Metadata(
                     source_url="https://example.test/show", source_site=provider,
                     media_kind="episode", title="Example Show", show_title="Example Show",
                     season_number="1", episode_number="1", episode_title="Pilot",
                     series_start_year="2025", series_end_year="2025", series_is_current=False,
                 )
-                source_folders = {first, second}
-                for index, source in enumerate((first, second), start=1):
+                unrelated = root / "unrelated.mkv"
+                unrelated.write_bytes(b"unrelated")
+                canonical = root / folder_name(meta)
+                for index in (1, 2):
                     stem = f"capture-{index}"
-                    video = source / f"{stem}.mkv"; nfo = source / f"{stem}.nfo"; thumb = source / f"{stem}-thumb.jpg"
+                    video = root / f"{stem}.mkv"; nfo = root / f"{stem}.nfo"; thumb = root / f"{stem}-thumb.jpg"
                     video.write_bytes(b"video"); nfo.write_text("nfo", encoding="utf-8"); thumb.write_bytes(b"thumb")
-                    group = group_type(source, stem, index, 1, [video, nfo, thumb])
-                    canonical = base.explicit_series_show_folder(temp, meta, folder_name)
-                    prepared = prepare(meta, group, {}, explicit_show_folder=canonical)
+                    group = group_type(root, stem, index, 1, [video, nfo, thumb])
+                    prepared = prepare(meta, group, {})
                     self.assertEqual(prepared.folder, canonical / f"S{index:02d}")
                     self.assertTrue(any(path.name.endswith("-thumb.jpg") for path in prepared.files))
                     self.assertTrue(any(path.suffix == ".nfo" for path in prepared.files))
-                base.cleanup_empty_provider_source_folders(source_folders, canonical, provider)
-                self.assertFalse(first.exists()); self.assertFalse(second.exists())
-                self.assertEqual([path.name for path in root.iterdir()], [folder_name(meta)])
+                    self.assertTrue(unrelated.exists())
+                    self.assertFalse(any(root.glob(f"{stem}*")))
+                self.assertEqual(len(list(canonical.rglob("*.mkv"))), 2)
+                self.assertTrue(unrelated.exists())
+
+    def test_handoff_requires_one_exact_completed_video_file(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            args = Namespace(
+                detail_link="https://example.test/watch/item",
+                media_folder=temp,
+                skip_existing=True,
+            )
+            with patch.object(base, "scrape_url") as scrape:
+                self.assertEqual(base.run_handoff(args, {}), 1)
+                scrape.assert_not_called()
+
+            video = root / "completed.mkv"
+            video.write_bytes(b"video")
+            args.media_folder = str(video)
+            meta = base.Metadata(
+                source_url=args.detail_link,
+                source_site="Example",
+                media_kind="movie",
+                title="Example",
+            )
+            with (
+                patch.object(base, "AnimatedStatus"),
+                patch.object(base, "scrape_url", return_value=meta),
+                patch.object(base, "save_provider_series_metadata", return_value=[]) as save,
+            ):
+                self.assertEqual(base.run_handoff(args, {}), 0)
+                self.assertEqual(save.call_args.kwargs["explicit_folder"], str(video.resolve()))
 
     def test_queue_identity_outranks_stale_position_for_remaining_providers(self):
         records = [

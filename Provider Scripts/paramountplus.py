@@ -27,6 +27,8 @@ USER_AGENT = (
     "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/137.0.0.0 Safari/537.36"
 )
 CURRENT_SERIES_WINDOW_DAYS = 45
+SERIES_CATALOG_URL = "https://www.paramountplus.com/browse/all/"
+MOVIE_CATALOG_URL = "https://www.paramountplus.com/movies/all/"
 
 
 def is_supported_url(url: str) -> bool:
@@ -41,7 +43,7 @@ def extract_metadata(url: str, timeout: int = 25) -> dict[str, Any]:
     page = fetch_text(normalized, timeout=timeout)
     path = urllib.parse.urlparse(normalized).path
     if "/movies/video/" in path:
-        return movie_metadata_from_page(page, normalized)
+        return movie_metadata_from_page(page, normalized, timeout=timeout)
     if "/shows/video/" in path or "/movies/trailer/video/" in path:
         try:
             return episode_metadata_from_page(page, normalized, timeout=timeout)
@@ -52,7 +54,7 @@ def extract_metadata(url: str, timeout: int = 25) -> dict[str, Any]:
     return show_metadata_from_page(page, normalized, timeout=timeout)
 
 
-def movie_metadata_from_page(page: str, source_url: str) -> dict[str, Any]:
+def movie_metadata_from_page(page: str, source_url: str, timeout: int = 25) -> dict[str, Any]:
     data = jsonld_of_type(page, "Movie")
     title = clean_text(data.get("name"))
     description = first_non_empty(
@@ -62,9 +64,7 @@ def movie_metadata_from_page(page: str, source_url: str) -> dict[str, Any]:
     movie_id = tracking_value(page, "movieId")
     runtime = first_match(page, r'<span class="duration">\s*([^<]+)')
     hero_image = first_match(page, r'(https://[^"\s,]*w1920[^"\s,]*pplcrn[^"\s,]*)')
-    poster = image_value(data.get("image"))
-    if re.search(r"(?:16[._x-]?9|1920[._x-]?1080)", urllib.parse.unquote(poster), re.IGNORECASE):
-        poster = ""
+    poster = paramount_catalog_poster(title, movie_id, "movie", timeout=timeout)
     backdrop = first_non_empty(hero_image, meta_content(page, "og:image"))
     if poster and clean_url_key(poster) == clean_url_key(backdrop):
         backdrop = ""
@@ -142,7 +142,7 @@ def clip_metadata_from_page(page: str, source_url: str) -> dict[str, Any]:
         "date": iso_date(clean_text(data.get("_airDateISO"))),
         "runtime_minutes": str(round(float(data.get("duration") or 0) / 60)) if data.get("duration") else "",
         "content_rating": clean_text(data.get("rating")),
-        "poster_url": image,
+        "poster_url": "",
         "fanart_url": image,
         "production_label": "Provider",
         "tags": provider_tags(["Public Clip"]),
@@ -176,6 +176,147 @@ def attached_public_extras(movie_id: str) -> list[dict[str, str]]:
     return extras
 
 
+def _paramount_catalog_poster_from_catalog(
+    title: str,
+    provider_id: str,
+    media_kind: str,
+    catalog_url: str,
+    wanted_heading: str,
+    timeout: int,
+) -> str:
+    try:
+        catalog_page = fetch_text(catalog_url, timeout=timeout)
+        raw_config = first_match(catalog_page, r"var\s+collectionConfig\s*=\s*(\[.*?\]);")
+        configs = json.loads(raw_config)
+    except Exception:
+        return ""
+    if not isinstance(configs, list):
+        return ""
+    config = next(
+        (
+            item
+            for item in configs
+            if isinstance(item, dict)
+            and clean_text(urllib.parse.unquote_plus(item.get("title", ""))).casefold() == wanted_heading
+        ),
+        {},
+    )
+    model = clean_text(config.get("model"))
+    token = clean_text(config.get("token"))
+    if not model or not token:
+        return ""
+    endpoint = (
+        "https://www.paramountplus.com/carousels/collections/configItems/"
+        + urllib.parse.quote(model, safe="")
+        + "/"
+        + urllib.parse.quote(token, safe="")
+    )
+    target_title = clean_text(title).casefold()
+    target_sort_title = re.sub(r"^(?:a|an|the)\s+", "", target_title)
+    target_id = clean_text(provider_id)
+
+    def page_at(offset: int) -> tuple[list[dict[str, Any]], int]:
+        try:
+            raw = fetch_text(f"{endpoint}/offset/{offset}/limit/20/", timeout=timeout)
+            payload = json.loads(raw)
+            if isinstance(payload, str):
+                payload = json.loads(payload)
+            result = payload.get("result", {}) if isinstance(payload, dict) else {}
+            items = result.get("data", []) if isinstance(result, dict) else []
+            orientation = clean_text(result.get("orientation")) if isinstance(result, dict) else ""
+            records = []
+            for item in items:
+                if isinstance(item, dict):
+                    record = dict(item)
+                    record["_catalog_orientation"] = orientation
+                    records.append(record)
+            return (records, int(result.get("total") or 0))
+        except Exception:
+            return ([], 0)
+
+    def matching_poster(items: list[dict[str, Any]]) -> str:
+        for item in items:
+            is_movie = item.get("isMovie") is True
+            if is_movie != (media_kind == "movie"):
+                continue
+            item_ids = {
+                clean_text(item.get("id")),
+                clean_text(item.get("showSeriesId")),
+                clean_text(item.get("content_id")),
+                clean_text(item.get("contentId")),
+            }
+            exact_id = bool(target_id and target_id in item_ids)
+            exact_title = clean_text(item.get("alt")).casefold() == target_title
+            if (target_id and not exact_id) or (not target_id and not exact_title):
+                continue
+            orientation = first_non_empty(item.get("orientation"), item.get("_catalog_orientation"))
+            if clean_text(orientation).casefold() != "portrait":
+                continue
+            poster = first_non_empty(item.get("thumb"), item.get("filepathPromoTilePosterImage"))
+            if poster:
+                return re.sub(r"/w\d+-q\d+/", "/w1400-q90/", poster, count=1)
+        return ""
+
+    first_items, total = page_at(0)
+    poster = matching_poster(first_items)
+    if poster or not first_items:
+        return poster
+    page_size = len(first_items)
+    low = 0
+    high = max(0, (total - 1) // page_size)
+    visited = {0}
+    while low <= high:
+        page_number = (low + high) // 2
+        if page_number in visited:
+            page_number += 1
+            if page_number > high or page_number in visited:
+                break
+        visited.add(page_number)
+        items, _ = page_at(page_number * page_size)
+        if not items:
+            break
+        poster = matching_poster(items)
+        if poster:
+            return poster
+        first_title = re.sub(r"^(?:a|an|the)\s+", "", clean_text(items[0].get("alt")).casefold())
+        last_title = re.sub(r"^(?:a|an|the)\s+", "", clean_text(items[-1].get("alt")).casefold())
+        if target_sort_title < first_title:
+            high = page_number - 1
+        elif target_sort_title > last_title:
+            low = page_number + 1
+        else:
+            break
+    return ""
+
+
+def paramount_catalog_poster(
+    title: str,
+    provider_id: str,
+    media_kind: str,
+    timeout: int = 25,
+    brand: str = "",
+) -> str:
+    """Return Paramount+'s own portrait catalog card, never a detail-page hero."""
+    catalog_url = MOVIE_CATALOG_URL if media_kind == "movie" else SERIES_CATALOG_URL
+    heading = "all movies a-z" if media_kind == "movie" else "all shows a-z"
+    poster = _paramount_catalog_poster_from_catalog(
+        title, provider_id, media_kind, catalog_url, heading, timeout
+    )
+    if poster or media_kind == "movie" or not clean_text(brand):
+        return poster
+    brand_slug = re.sub(r"[^a-z0-9]+", "-", clean_text(brand).casefold()).strip("-")
+    if not brand_slug:
+        return ""
+    return _paramount_catalog_poster_from_catalog(
+        title,
+        provider_id,
+        media_kind,
+        f"https://www.paramountplus.com/brands/{brand_slug}/",
+        "a-z",
+        timeout,
+    )
+
+
 def show_metadata_from_page(page: str, source_url: str, timeout: int) -> dict[str, Any]:
     title = first_non_empty(
         text_between(page, r'<div class="about__header-title">', r"</div>"),
@@ -192,8 +333,8 @@ def show_metadata_from_page(page: str, source_url: str, timeout: int) -> dict[st
     landscape = first_match(page, r'(https://[^"\s,]*w3200[^"\s,]*)') or first_match(
         page, r'<img src="([^"]+lok_[^"]*hero_landscape[^"]*)"'
     )
-    portrait = first_match(page, r'(https://[^"\s,]*w2400[^"\s,]*)')
     social = meta_content(page, "og:image")
+    poster = paramount_catalog_poster(title, show_id, "series", timeout=timeout, brand=values.get("Brand", ""))
     preview_url = first_match(page, r'data-media-url="([^"]*previewhls[^"]*)"')
     seasons = all_season_urls(page, source_url)
     if season_count.isdigit():
@@ -256,7 +397,7 @@ def show_metadata_from_page(page: str, source_url: str, timeout: int) -> dict[st
         "series_end_year": end_year,
         "series_is_current": is_current,
         "content_rating": values.get("Rating", ""),
-        "poster_url": portrait or social,
+        "poster_url": poster,
         "fanart_url": landscape or social,
         "logo_url": logo_url,
         "trailer_url": preview_url,

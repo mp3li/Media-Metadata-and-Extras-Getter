@@ -8,10 +8,10 @@
   <img alt="Status" src="https://img.shields.io/badge/Status-In_Active_Development-660000?style=flat-square&labelColor=04040c" />
   <img alt="Interface" src="https://img.shields.io/badge/Interface-Terminal-660000?style=flat-square&labelColor=04040c" />
   <img alt="Metadata" src="https://img.shields.io/badge/Metadata-Jellyfin_Style_NFO-660000?style=flat-square&labelColor=04040c" />
-  <img alt="Providers" src="https://img.shields.io/badge/Providers-Amazon%2C_Netflix%2C_Disney%2B%2C_Max%2C_BBC%2C_Paramount%2B%2C_Crunchyroll_%26_PBS_KIDS-660000?style=flat-square&labelColor=04040c" />
   <img alt="Downloads" src="https://img.shields.io/badge/Downloads-Artwork%2C_Trailers_%26_Metadata-660000?style=flat-square&labelColor=04040c" />
   <img alt="Bulk Processing" src="https://img.shields.io/badge/Bulk_Processing-Optional-660000?style=flat-square&labelColor=04040c" />
   <img alt="Platform" src="https://img.shields.io/badge/Platform-macOS-660000?style=flat-square&labelColor=04040c" />
+  <img alt="Providers" src="https://img.shields.io/badge/Providers-Amazon%2C_Netflix%2C_Disney%2B%2C_HBO_Max%2C_BBC%2C_Paramount%2B%2C_Crunchyroll_%26_PBS_KIDS-660000?style=flat-square&labelColor=04040c" />
 </p>
 
 ## Table of Contents
@@ -108,14 +108,22 @@ Unfortunately this tool does not cover that provider at this time. Please make a
 
 Every supported television provider follows the same local-only MediaFab handoff contract where its public catalog supplies exact episode identities:
 
-- MediaFab supplies one common queue destination as `--media-folder`; the tool creates or reuses exactly one year-qualified series folder beneath it, with `tvshow.nfo` and available series artwork beside `S01`, `S02`, and later season folders.
+- MediaFab calls MME after each individual download and supplies that exact completed video file as `--media-folder`. A directory, shared queue root, or queue manifest is not a valid handoff target.
+- Each invocation immediately matches, renames, organizes, and writes metadata for only that supplied video and its same-basename subtitle sidecars. It does not wait for the rest of a queue.
+- The first episode creates the year-qualified series folder, `tvshow.nfo`, available series artwork, and its season folder. Every later invocation reuses that same series root and preserves the existing series bundle while adding the newly completed episode to `S01`, `S02`, or the appropriate later season.
+- A provider-named output such as `ParamountPlus/` remains the library root even when the downloader puts the completed file in a title/season/quality staging wrapper beneath it. MME searches that provider output for the existing title-matched series root before creating anything, promotes a single accidentally nested series root back to the provider output, and fails closed instead of creating a duplicate when more than one possible series root exists.
 - The provider catalog is an identity table, not a download list. Only completed local media receives episode NFO files and one matching landscape `-thumb`; absent episodes receive nothing.
 - Exact provider IDs in completed filenames take priority over stale season/episode text. Recognized placement and title matching are fallbacks; runtime, duration, queue order, and anonymous timestamp names are never used to guess identity.
 - Existing subtitle suffixes and already-generated episode NFO/thumbnail sidecars move with their episode. Destinations are validated before a two-phase rename or move, and existing files are never overwritten.
-- Separate MediaFab job folders converge into the same series root. A source folder is removed only after the successful workflow proves it empty apart from `.DS_Store`.
-- A broad shared destination may contain other organized shows: existing foreign series roots are excluded before position or title fallback, so another show's `S01E01` cannot be claimed by the current catalog.
+- Processing a directory or importing several existing files remains a separate manual workflow. MediaFab handoffs never depend on a directory scan or a deferred post-queue pass.
 - A catalog page that advertises additional seasons but cannot load them fails closed instead of silently organizing against a partial guide. Optional trailer or extra-video failure remains non-fatal and provider-isolated.
 - Transparent provider logos are byte-checked and converted to genuine PNG when macOS can convert the source; otherwise their truthful image extension is retained rather than disguising another format as PNG.
+
+The stable handoff interface is:
+
+```text
+--handoff --detail-link <provider-page> --media-folder <exact-completed-file> --skip-existing
+```
 
 The identity MediaFab should preserve is provider-specific: Crunchyroll watch ID, Disney+ play UUID, Max episode UUID, Paramount+ episode ID, Prime Video compact ID/GTI/ASIN, PBS KIDS video or legacy media ID, BBC programme PID, or Netflix title/episode ID. Netflix series Queue Mode deliberately skips organization when its public title data does not expose a complete identifiable episode catalog.
 
@@ -142,7 +150,7 @@ Coverage depends on what the provider exposes in the public page data for each i
 - a direct trailer only when a usable direct media URL is exposed
 - the exact `Netflix Provider` tag on every Netflix NFO
 - movie handoffs remain beneath the supplied MediaFab destination in `Movie Title (Year)/`, with matching local media and subtitles renamed only after collision validation
-- series Queue Mode is available only when the public title data exposes episode IDs with exact season/episode placement; those IDs outrank stale filename placement, locally present episodes are consolidated into one year-qualified series root, and an incomplete or absent public guide is skipped without guessing
+- series Queue Mode is available only when the public title data exposes episode IDs with exact season/episode placement; those IDs outrank stale filename placement, each supplied file is immediately added to the reusable year-qualified series root, and an incomplete or absent public guide is skipped without guessing
 
 ### Disney+
 
@@ -166,7 +174,7 @@ Coverage depends on what the provider exposes in the public page data for each i
 - Queue Mode uses the public guide only as an identity table: a Max episode UUID in the completed filename can be matched to exactly one guide entry, and only locally present episodes are renamed, organized, and written; no duration or queue-order guessing is used
 - provider trailer title, description, program ID, and exact public trailer page are retained when exposed; public Max free/creative trailers and selected extra-video pages are resolved only at the end of the workflow and saved in Jellyfin's native `trailers/` and `Extras/Videos/` locations only when their HLS/DASH manifests are clear and contain no content-protection declaration
 - the signed-in player may display audio and subtitle lists that the anonymous public catalog omits; missing private player fields are not invented
-- MME supplies the complete show catalog used by Queue Mode; MediaFab only needs to preserve each Max episode UUID in the completed filename and pass the show URL once for that queue
+- MME supplies the complete show catalog used for matching; on every completed-item handoff, MediaFab preserves that episode's Max UUID in the filename, passes the show URL, and supplies the exact completed video file
 - a standalone `play.hbomax.com/video/watch/<episode-id>` page publicly exposes only the episode UUID and cannot bootstrap its unknown parent show by itself; an exact public `/show/.../<episode-id>` catalog URL can identify a single episode directly
 
 ### BBC iPlayer
@@ -184,7 +192,7 @@ Coverage depends on what the provider exposes in the public page data for each i
 - episode title, season/episode number, synopsis, date, duration where Paramount+ exposes it, public episode ID, available episode artwork, and exact audio/subtitle languages when a public page exposes them
 - the exact `Paramount+ Provider` tag on every Paramount+ NFO, alongside the existing source/provider tags
 - show portrait as Jellyfin `poster`, wide hero artwork as `backdrop`, and title art as `logo` at the series root; each local episode receives its own full-resolution `-thumb` image
-- MME builds the complete Paramount+ catalog from one show link for Queue Mode; exact episode IDs preserved in completed filenames outrank stale `SxxExx` text, while recognized season/episode placement remains the fallback
+- MME builds the complete Paramount+ catalog from the show link on each exact-file handoff; exact episode IDs preserved in completed filenames outrank stale `SxxExx` text, while recognized season/episode placement remains the fallback
 - a playing-page URL resolves its public parent-show page and carries the complete show catalog and metadata into the save, so an episode is never written without `tvshow.nfo` and available series artwork beside its season folders
 - Jellyfin series folders named `Series Title (Year)` for a completed single-year run, `Series Title (Start Year-End Year)` for a completed multi-year run, or `Series Title (Start Year-)` while currently airing
 - one provider-supplied public preview, when available and confirmed clear, under Jellyfin's native `trailers/trailer.mp4` layout; provider-exposed public extras use `Extras/Videos/`, both run last, and Paramount+ never uses the Crunchyroll YouTube fallback
@@ -430,7 +438,7 @@ Bluey Tunes (2026)/
     S01E01 Bluey Tunes - Taxi-thumb.webp
 ```
 
-Disney+'s complete public `seoSeasons` guide is used only as a lookup table. A series page can match already named local episodes across every public season, but it does not create NFOs or thumbnails for episodes that are not present locally. For a MediaFab/WidevineProxy2 handoff, pass the current `/play/...` URL and preferably the exact newly completed media file; this lets the provider safely assign a generic `manifest_...` file to the correct episode.
+Disney+'s complete public `seoSeasons` guide is used only as a lookup table. A manual directory run can match already named local episodes across every public season, but it does not create NFOs or thumbnails for episodes that are not present locally. For every MediaFab handoff, pass the current `/play/...` URL and the exact newly completed media file; this lets the provider safely assign a generic `manifest_...` file to the correct episode immediately.
 
 Subtitle sidecars retain the complete suffix following the original media stem, including labels such as `.en_us.srt`. The provider does not infer or delete Disney+ subtitle tracks. Broad media-root scans additionally require the series title in the path, and every rename/move destination is validated before a two-phase operation.
 
@@ -466,7 +474,7 @@ Series Title (Start Year-)/
     S01E01 Series Title - Episode Title-thumb.jpg
 ```
 
-The guide is a lookup table, not an instruction to create missing episodes. MME builds that complete guide from the show page; Queue Mode only needs to pass that show page and preserve each Max episode UUID in its completed filename. The tool matches that UUID to the exact guide record, and the UUID takes priority over a stale `S01E01` string. Recognized `S01E01`-style placements also work when no UUID is present. Anonymous files without a UUID or placement are left untouched instead of being guessed from duration or queue order.
+The guide is a lookup table, not an instruction to create missing episodes. For each completed episode, MediaFab passes the show page, that exact video file, and a filename preserving its Max episode UUID. The tool matches that UUID to the exact guide record, and the UUID takes priority over a stale `S01E01` string. Recognized `S01E01`-style placements also work when no UUID is present. Anonymous files without a UUID or placement are left untouched instead of being guessed from duration or queue order.
 
 ```json
 "hbomax_series_metadata_enabled": true,
@@ -499,7 +507,7 @@ Series Title (Start Year-)/
     S01E01 Series Title - Episode Title-thumb.jpg
 ```
 
-For Queue Mode, pass the Paramount+ show page once and preserve each episode's Paramount+ ID in its completed filename. MME builds the complete multi-season catalog and matches those IDs itself; an exact ID takes priority over stale season/episode text. A recognized placement such as `S01E01` remains the fallback when no ID is present. The guide is only an identity table, so missing local episodes receive no files and an unmatched queue cannot fall back to generic guide-only output.
+For every completed-item handoff, pass the Paramount+ show page and that exact video file, preserving its Paramount+ episode ID in the completed filename. MME builds the complete multi-season catalog and matches the supplied file itself; an exact ID takes priority over stale season/episode text. A recognized placement such as `S01E01` remains the fallback when no ID is present. The guide is only an identity table, so missing local episodes receive no files and an unmatched file cannot fall back to generic guide-only output.
 
 An individual playing-page handoff also remains supported: pass that page URL and the exact newly completed media file when processing one episode. The tool gives that file the page's season and episode placement even when its temporary name is only `manifest_...`, and the playing page carries the complete parent catalog. Subtitle sidecars retain their complete existing suffix after the old video stem, so provider language labels such as `.en_us.srt` are preserved and distinct tracks are neither guessed nor deleted.
 
@@ -598,7 +606,7 @@ It also recognises the normalized names it produces, such as `S02E07 The Great B
 
 ## Amazon Prime Video Series Mode
 
-Provide a Prime Video season page to match every locally present episode across its public season selector, or provide an exact episode detail page for one completed file. Prime Video episode pages use the same `/detail/...` form as seasons, but their compact Prime Video ID identifies the selected episode while the page still exposes its parent season and full series guide.
+For manual directory processing, provide a Prime Video season page to match locally present episodes across its public season selector. For a MediaFab handoff, provide the exact episode detail page and exact completed file. Prime Video episode pages use the same `/detail/...` form as seasons, but their compact Prime Video ID identifies the selected episode while the page still exposes its parent season and full series guide.
 
 The resulting Jellyfin layout is:
 
@@ -617,7 +625,7 @@ Making The Cut (2020-2022)/
 
 Series folders use `Series Title (Year)` for a single completed year, `Series Title (Start Year-End Year)` for a completed multi-year run, or `Series Title (Start Year-)` for a currently releasing series. An existing title-only or stale year-qualified root is migrated safely rather than nested.
 
-A Queue Mode folder can match episodes by SxxExx placement, title, compact Prime Video ID, GTI, or ASIN. The guide is only a lookup table: missing local episodes do not receive NFO files or images, and multiple anonymous timestamp-only files remain untouched because they cannot be assigned safely. An exact episode link plus one exact completed file is unambiguous even when that file still has a generic `manifest_...` name.
+Manual directory processing can match episodes by SxxExx placement, title, compact Prime Video ID, GTI, or ASIN. The guide is only a lookup table: missing local episodes do not receive NFO files or images, and multiple anonymous timestamp-only files remain untouched because they cannot be assigned safely. A MediaFab handoff always supplies an exact episode link plus one exact completed file, which is unambiguous even when that file still has a generic `manifest_...` name.
 
 The rating tags are written together and in this exact order for Jellyfin plugin consumption:
 
@@ -636,17 +644,17 @@ The values come from the selected Prime Video detail page and can change; the ta
 
 Netflix movie handoffs use the supplied MediaFab destination and create `Movie Title (Year)/` there, moving only the matched video and its directly linked subtitle sidecars after collision checks. Available provider poster/backdrop artwork and a direct public trailer are saved in their Jellyfin roles; trailer work runs after the metadata and organization workflow.
 
-Netflix series Queue Mode is intentionally stricter because public Netflix title pages do not consistently expose a complete episode guide. It runs only when the page data supplies an exact Netflix episode ID together with season and episode placement. When that catalog exists, completed filenames containing those IDs are matched before any stale `SxxExx` text, separate job folders converge into one year-qualified series root, and only local episodes receive NFO and thumbnail files. When the public catalog is missing or incomplete, the provider reports that Queue Mode was skipped and leaves the media untouched instead of guessing by duration, queue order, or timestamp filename.
+Netflix series Queue Mode is intentionally stricter because public Netflix title pages do not consistently expose a complete episode guide. It runs only when the page data supplies an exact Netflix episode ID together with season and episode placement. When that catalog exists, each exact completed file is matched by ID before any stale `SxxExx` text, immediately added to the reusable year-qualified series root, and given its episode NFO and thumbnail. When the public catalog is missing or incomplete, the provider reports that Queue Mode was skipped and leaves the supplied media untouched instead of guessing by duration, queue order, or timestamp filename.
 
 ## BBC Series Mode
 
-BBC series mode is designed for a library or MediaFab queue that already contains the episodes. It does not download video or subtitle media. Instead, it builds the complete public catalog across every advertised series slice, matches BBC PIDs before filename placement or titles, and writes metadata only for episodes that exist locally.
+BBC series mode does not download video or subtitle media. In a MediaFab queue it runs after each completed download, matches that exact file by BBC PID before filename placement or title, and finishes its metadata and organization immediately. The separate manual/import workflow can scan an existing library against the complete public catalog across every advertised series slice.
 
 ### Links to provide
 
-Give the tool **one representative BBC iPlayer episode link per show**. You do not need one link per season: its related-series data is used to load every advertised slice before any Queue Mode organization begins. If an advertised slice cannot be loaded, the run stops rather than treating a partial catalog as complete.
+For a MediaFab handoff, pass the current item's BBC iPlayer detail link and exact completed video file. Its related-series data loads every advertised slice needed to identify that item before organization begins. If an advertised slice cannot be loaded, the run stops rather than treating a partial catalog as complete.
 
-For several shows, add one representative link for each show to `My Links Txt/mylinks.txt` and choose import mode. The tool processes the shows one at a time; each link only matches files belonging to that show.
+For manual/import processing of several existing shows, add one representative link for each show to `My Links Txt/mylinks.txt`. The tool processes the shows one at a time; each link only matches files belonging to that show.
 
 ### What it matches
 
@@ -690,11 +698,11 @@ S01E05 The Great British Sewing Bee - Christmas Special.mp4
 
 The One Piece pattern retains the show, series/arc title, and episode title; it removes only the BBC ID and a trailing range such as `(62-135)`. The Sewing Bee pattern uses the shorter show-only name, except that specials retain their descriptive label.
 
-With `bbc_series_organize_enabled` set to `true`—the default—the matching video, subtitle, episode NFO, and thumbnail are placed under `S01`, `S02`, and so on beneath one year-qualified series root. Series metadata and artwork remain beside those season folders. Separate Queue Mode job folders converge into that same root and are removed only after they are proven empty. The tool checks for collisions before renaming or moving files and will not overwrite an existing destination.
+With `bbc_series_organize_enabled` set to `true`—the default—the matching video, subtitle, episode NFO, and thumbnail are placed under `S01`, `S02`, and so on beneath one year-qualified series root. Series metadata and artwork remain beside those season folders. Each exact-file MediaFab handoff completes this work immediately; later episodes reuse the existing root. The tool checks for collisions before renaming or moving files and will not overwrite an existing destination.
 
 ## Crunchyroll Series Mode
 
-Provide one Crunchyroll series page to process every locally present episode of that show, or provide one episode/watch page for a specific file. The matcher recognizes `S01E01`, `S1 E1`, `Season 1 Episode 1`, `Series 1 Episode 1`, `1x01`, `01-01`, and season-one forms such as `E1`. Outside an explicit handoff folder, the show title must also occur in the local path to prevent an episode number from matching another series.
+For a manual directory run, provide one Crunchyroll series page to process locally present episodes of that show. For a MediaFab handoff, provide the episode/watch page and the exact newly completed file. The matcher recognizes `S01E01`, `S1 E1`, `Season 1 Episode 1`, `Series 1 Episode 1`, `1x01`, `01-01`, and season-one forms such as `E1`. Outside an explicit handoff file, the show title must also occur in the local path to prevent an episode number from matching another series.
 
 A same-basename `.jpg` is treated as an incomplete-download marker and causes that media file to be skipped. Videos and subtitle sidecars are moved together; no subtitle is invented when one is absent.
 
@@ -742,7 +750,7 @@ These are live values and can change between runs; the tag names and ordering re
 
 You can provide a PBS KIDS series page, a full-episode playlist page, or an individual episode watch page. Each form resolves the same currently available full-episode guide. The guide is only a lookup table: the tool writes episode metadata and artwork only for episodes that exist in the supplied local location.
 
-An individual watch-page handoff is the safest route for one newly completed generic file because it identifies the exact episode. A Queue Mode folder can match multiple episodes when each filename contains an episode title, PBS KIDS video ID, legacy PBS media ID, or season/episode placement. Multiple anonymous timestamp-only files are deliberately left untouched because the provider cannot safely determine which episode belongs to which file.
+An individual watch-page handoff processes one newly completed generic file immediately because the page identifies the exact episode. Manual directory processing can match multiple existing episodes when each filename contains an episode title, PBS KIDS video ID, legacy PBS media ID, or season/episode placement. Multiple anonymous timestamp-only files are deliberately left untouched because the provider cannot safely determine which episode belongs to which file.
 
 The resulting Jellyfin layout is:
 
