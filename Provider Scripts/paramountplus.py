@@ -62,9 +62,13 @@ def movie_metadata_from_page(page: str, source_url: str) -> dict[str, Any]:
     movie_id = tracking_value(page, "movieId")
     runtime = first_match(page, r'<span class="duration">\s*([^<]+)')
     hero_image = first_match(page, r'(https://[^"\s,]*w1920[^"\s,]*pplcrn[^"\s,]*)')
-    artwork = first_non_empty(hero_image, clean_text(data.get("image")), meta_content(page, "og:image"))
+    poster = image_value(data.get("image"))
+    if re.search(r"(?:16[._x-]?9|1920[._x-]?1080)", urllib.parse.unquote(poster), re.IGNORECASE):
+        poster = ""
+    backdrop = first_non_empty(hero_image, meta_content(page, "og:image"))
+    if poster and clean_url_key(poster) == clean_url_key(backdrop):
+        backdrop = ""
     logo = first_match(page, r'<div class="movieLogo">\s*<img[^>]+src="([^"]+)"')
-    brand_logo = first_match(page, r'<div class="brand-logo">.*?<img[^>]+src="([^"]+)"',)
     cast_text = html_text(text_between(page, r'<section class="movie__cast">', r"</section>"))
     cast_text = re.sub(r"^Featuring:\s*", "", cast_text, flags=re.I)
     preview_url = first_match(page, r'data-media-url="([^"]*previewhls[^"]*)"')
@@ -73,36 +77,42 @@ def movie_metadata_from_page(page: str, source_url: str) -> dict[str, Any]:
     add_field(fields, "Paramount+ movie ID", movie_id)
     add_field(fields, "Trailer page", urllib.parse.urljoin(source_url, trailer_page))
     add_field(fields, "Public preview manifest", preview_url)
-    add_field(fields, "Availability", "Subscription movie; the public autoplay preview is handled separately")
+    add_language_fields(fields, page)
     attached_extras = attached_public_extras(movie_id)
     for extra in attached_extras:
         add_field(fields, "Attached related-world extra", extra["title"] + " | " + extra["page"])
+    cast_names = dedupe(
+        [clean_text(name) for name in cast_text.split(",") if clean_text(name)]
+        or person_names(data.get("actor"))
+    )
+    visible_year = first_match(page, r'class=["\'][^"\']*movie__air-year[^"\']*["\'][^>]*>\s*(\d{4})')
     return {
         "source_url": source_url,
         "source_site": NAME,
+        "media_kind": "movie",
         "title": title,
         "outline": description,
         "plot": clean_text(data.get("description")) or description,
-        "year": iso_date(clean_text(data.get("datePublished")))[:4],
+        "year": visible_year or iso_date(clean_text(data.get("datePublished")))[:4],
         "runtime_minutes": duration_minutes(runtime),
         "content_rating": clean_text(data.get("contentRating")),
-        "poster_url": artwork,
-        "fanart_url": artwork,
+        "poster_url": poster,
+        "fanart_url": backdrop,
         "logo_url": logo,
         "trailer_url": preview_url,
         "production_label": "Provider",
-        "genres": [clean_text(data.get("genre"))],
+        "genres": split_list(data.get("genre")),
         "tags": provider_tags(),
-        "studios": ["Paramount Pictures", STUDIO_NAME],
-        "actors": [{"name": name, "role": ""} for name in cast_text.split(",") if clean_text(name)],
+        "studios": [STUDIO_NAME],
+        "actors": [{"name": name, "role": ""} for name in cast_names],
+        "directors": person_names(data.get("director")),
+        "writers": person_names(data.get("creator")),
         "unique_ids": {"paramountplus": movie_id} if movie_id else {},
         "extra_fields": fields,
         "extra_videos": attached_extras,
-        "gallery_urls": dedupe([artwork, brand_logo]),
+        "gallery_urls": [],
         "folder_name_override": title,
-        "warnings": [
-            "The feature film is subscription playback. Only its separately exposed, public autoplay preview is downloaded."
-        ],
+        "warnings": [],
     }
 
 
@@ -111,7 +121,9 @@ def clip_metadata_from_page(page: str, source_url: str) -> dict[str, Any]:
     jsonld = jsonld_of_type(page, "TVClip")
     title = first_non_empty(clean_text(data.get("label")), clean_text(jsonld.get("name")))
     description = first_non_empty(clean_text(data.get("description")), clean_text(jsonld.get("description")))
-    image = first_non_empty(clean_text(data.get("thumbnail")), clean_text(jsonld.get("image")), meta_content(page, "og:image"))
+    image = first_non_empty(
+        image_value(data.get("thumbnail")), image_value(jsonld.get("image")), meta_content(page, "og:image")
+    )
     stream_url = clean_text(data.get("streamingUrl"))
     clip_id = first_non_empty(clean_text(data.get("contentId")), clean_text(jsonld.get("@id")))
     fields: dict[str, list[str]] = {}
@@ -186,11 +198,12 @@ def show_metadata_from_page(page: str, source_url: str, timeout: int) -> dict[st
     seasons = all_season_urls(page, source_url)
     if season_count.isdigit():
         for season_number in range(1, int(season_count) + 1):
-            seasons.setdefault(season_number, source_url.rstrip("/") + f"/episodes/{season_number}/")
+            explicit_url = source_url.rstrip("/") + f"/episodes/{season_number}/"
+            discovered = seasons.get(season_number, "")
+            if not discovered or urllib.parse.urlparse(discovered).path.rstrip("/") == urllib.parse.urlparse(source_url).path.rstrip("/"):
+                seasons[season_number] = explicit_url
     episode_records = parse_episode_cards(page, source_url)
     for season_number, season_url in seasons.items():
-        if season_number == 1:
-            continue
         try:
             season_page = fetch_text(season_url, timeout=timeout)
         except Exception:
@@ -202,10 +215,16 @@ def show_metadata_from_page(page: str, source_url: str, timeout: int) -> dict[st
     add_field(fields, "Paramount+ show ID", show_id)
     add_field(fields, "Brand", values.get("Brand", ""))
     add_field(fields, "Season count", season_count)
+    add_field(fields, "Episode count", str(len(episode_records)))
     add_field(fields, "Public preview manifest", preview_url)
-    add_field(fields, "Public preview captions", "None advertised by the manifest") if preview_url else None
+    add_language_fields(fields, page)
     for season_number in sorted(seasons):
         add_field(fields, "Available season", f"Season {season_number} | {seasons[season_number]}")
+        add_field(
+            fields,
+            f"Season {season_number} episode count",
+            str(sum(1 for record in episode_records if record.get("season") == season_number)),
+        )
     for record in episode_records:
         add_field(
             fields,
@@ -240,17 +259,14 @@ def show_metadata_from_page(page: str, source_url: str, timeout: int) -> dict[st
         "logo_url": logo_url,
         "trailer_url": preview_url,
         "production_label": "Provider",
-        "genres": [values.get("Genre", "")],
+        "genres": split_list(values.get("Genre", "")),
         "tags": provider_tags(),
         "studios": [values.get("Brand", ""), STUDIO_NAME],
         "unique_ids": {"paramountplus": show_id} if show_id else {},
         "extra_fields": fields,
-        "gallery_urls": dedupe([social, portrait, landscape]),
+        "gallery_urls": [],
         "folder_name_override": title,
-        "warnings": [
-            "The public preview manifest advertises no closed-caption track. "
-            "Paramount+ subscription episode playback is not downloaded by this tool."
-        ],
+        "warnings": [],
         "series_episodes": episode_records,
     }
 
@@ -288,6 +304,18 @@ def episode_metadata_from_page(page: str, source_url: str, timeout: int = 25) ->
     add_field(fields, "Paramount+ show ID", first_value(series_fields.get("Paramount+ show ID")))
     add_field(fields, "Brand", first_value(series_fields.get("Brand")))
     add_field(fields, "Season count", first_value(series_fields.get("Season count")))
+    audio = page_language_values(page, "audio") or list(series_fields.get("Audio", []))
+    subtitles = page_language_values(page, "subtitles") or list(series_fields.get("Subtitles", []))
+    add_field(fields, "Audio", audio)
+    add_field(fields, "Subtitles", subtitles)
+    full_guide = dedupe_records([
+        *(
+            series_metadata.get("series_episodes", [])
+            if isinstance(series_metadata.get("series_episodes"), list)
+            else []
+        ),
+        record,
+    ])
     return {
         "source_url": source_url,
         "source_site": NAME,
@@ -317,7 +345,7 @@ def episode_metadata_from_page(page: str, source_url: str, timeout: int = 25) ->
         "studios": list(series_metadata.get("studios", [])) or [STUDIO_NAME],
         "unique_ids": {"paramountplus": record.get("id", "")} if record.get("id") else {},
         "extra_fields": fields,
-        "series_episodes": [record],
+        "series_episodes": full_guide,
         "series_metadata": series_metadata,
         "folder_name_override": resolved_show_title,
     }
@@ -346,7 +374,7 @@ def parse_episode_cards(page: str, show_url: str) -> list[dict[str, Any]]:
             {
                 "id": first_match(article, r'vilynx-id="([^"]+)"'),
                 "url": urllib.parse.urljoin(show_url, html.unescape(link)),
-                "show_title": clean_text(first_match(article, r'aa-link="Full Episodes\|\|play\|\d+\|([^|]+)')),
+                "show_title": clean_text(first_match(article, r'aa-link="Full Episodes\|\|play\|\d+\|([^|"]+)')),
                 "season": int(match.group(1)),
                 "episode": int(match.group(2)),
                 "title": heading or match.group(4).strip(),
@@ -410,7 +438,7 @@ def jsonld_episode(page: str, source_url: str) -> dict[str, Any]:
             "description": clean_text(data.get("description")),
             "duration": clean_text(data.get("duration")),
             "date": iso_date(clean_text(data.get("datePublished"))),
-            "image": clean_text(data.get("image")),
+            "image": image_value(data.get("image")),
         }
     return {}
 
@@ -461,6 +489,80 @@ def series_run_years(
 
 def provider_tags(additional: list[str] | None = None) -> list[str]:
     return dedupe([NAME, f"Provider: {NAME}", "Paramount+ Provider", *(additional or [])])
+
+
+def add_language_fields(fields: dict[str, list[str]], page: str) -> None:
+    add_field(fields, "Audio", page_language_values(page, "audio"))
+    add_field(fields, "Subtitles", page_language_values(page, "subtitles"))
+
+
+def page_language_values(page: str, kind: str) -> list[str]:
+    keys = (
+        ("audioLanguages", "audioLanguage", "availableAudioLanguages")
+        if kind == "audio"
+        else ("subtitleLanguages", "subtitleLanguage", "availableSubtitleLanguages")
+    )
+    values: list[str] = []
+    for key in keys:
+        for raw in re.findall(r'"' + re.escape(key) + r'"\s*:\s*(\[[^\]]*\]|"(?:\\.|[^"])*")', page, re.I):
+            try:
+                parsed = json.loads(raw)
+            except json.JSONDecodeError:
+                continue
+            values.extend(language_names(parsed))
+    label = "Audio Languages" if kind == "audio" else "Subtitle Languages"
+    for raw in re.findall(
+        r'<[^>]+>\s*' + re.escape(label) + r'\s*</[^>]+>\s*<[^>]+>(.*?)</[^>]+>',
+        page,
+        re.I | re.S,
+    ):
+        values.extend(re.split(r"\s*[,;]\s*", html_text(raw)))
+    return dedupe(values)
+
+
+def language_names(value: Any) -> list[str]:
+    if isinstance(value, list):
+        return dedupe([name for item in value for name in language_names(item)])
+    if isinstance(value, dict):
+        for key in ("displayName", "localizedName", "label", "name", "languageName"):
+            if clean_text(value.get(key)):
+                return [clean_text(value[key])]
+        return []
+    if isinstance(value, bool) or value is None:
+        return []
+    return [clean_text(value)] if clean_text(value) else []
+
+
+def person_names(value: Any) -> list[str]:
+    values = value if isinstance(value, list) else [value]
+    names: list[str] = []
+    for item in values:
+        if isinstance(item, dict):
+            names.append(clean_text(item.get("name")))
+        else:
+            names.append(clean_text(item))
+    return dedupe(names)
+
+
+def split_list(value: Any) -> list[str]:
+    if isinstance(value, list):
+        return dedupe([item for entry in value for item in split_list(entry)])
+    return dedupe(re.split(r"\s*[;,]\s*", clean_text(value)))
+
+
+def image_value(value: Any) -> str:
+    if isinstance(value, list):
+        return next((image_value(item) for item in value if image_value(item)), "")
+    if isinstance(value, dict):
+        return first_non_empty(
+            clean_text(value.get("url")), clean_text(value.get("contentUrl")), clean_text(value.get("@id"))
+        )
+    return clean_text(value)
+
+
+def clean_url_key(value: str) -> str:
+    parsed = urllib.parse.urlsplit(clean_text(value))
+    return urllib.parse.urlunsplit((parsed.scheme.casefold(), parsed.netloc.casefold(), parsed.path, parsed.query, ""))
 
 
 def jsonld_of_type(page: str, wanted_type: str) -> dict[str, Any]:
@@ -587,10 +689,12 @@ def clean_text(value: Any) -> str:
     return re.sub(r"\s+", " ", str(value or "")).strip()
 
 
-def add_field(fields: dict[str, list[str]], label: str, value: str) -> None:
-    text = clean_text(value)
-    if text and text not in fields.setdefault(label, []):
-        fields[label].append(text)
+def add_field(fields: dict[str, list[str]], label: str, value: Any) -> None:
+    values = value if isinstance(value, (list, tuple)) else [value]
+    for item in values:
+        text = clean_text(item)
+        if text and text not in fields.setdefault(label, []):
+            fields[label].append(text)
 
 
 def dedupe(values: list[str]) -> list[str]:

@@ -6,10 +6,27 @@ All notable project changes are documented here. Published entries are derived f
 
 ### Added
 
+- HBO Max provider for public movie, show, and show-episode catalog pages, including selected title, description, release, exact exposed runtime/language, genre, brand, rating-authority/descriptor, credit, ID, season-count, episode-count, season-ID, complete-guide, trailer, and extra-video metadata.
+- HBO Max title artwork using exactly one series/movie `poster`, `backdrop`, `thumb`, and `logo`, with the selected secondary backdrop in `extrafanart`; episodes receive exactly one landscape `-thumb` and no episode posters or alternate covers.
+- HBO Max Queue Mode catalog enrichment and matching by exact episode UUID or recognized season/episode placement, with UUID priority, local-only NFO/artwork output, safe media/subtitle renaming, year-qualified roots, season organization, collision refusal, and no duration or queue-order guessing.
+- End-of-workflow HBO Max public-preview capture with Jellyfin-native `trailers/trailer.mp4` and `Extras/Videos/` output, limited to Max free/creative streams whose HLS/DASH manifests declare no encryption or content protection.
+- The exact `HBO Max Provider` tag on every HBO Max movie, series, and episode NFO.
+
+- Paramount+ Queue Mode parity using one MME-built show catalog, exact episode-ID priority over stale placement text, complete parent catalogs on playing-page handoffs, and safe no-output behavior for unmatched guide entries.
+- Paramount+ MediaFab movie handoffs now remain beneath the explicitly supplied location and preserve distinct provider poster, backdrop, and title-logo roles without invented fanart/banner/landscape duplicates.
+- Paramount+ source-backed audio/subtitle fields, per-season and total episode counts, genuine-PNG logo validation, and end-of-workflow Jellyfin-native trailers/extras.
+
+- Crunchyroll-standard Amazon Prime Video series and exact episode detail-page support using Prime Video's public hydration data and multi-season guides.
+- Prime Video episode placement, synopsis, date, runtime, language, accessibility/playback feature, compact ID, GTI, ASIN, and thumbnail metadata with parent-series resolution.
+- The exact `Amazon Prime Video Provider` tag and ordered `amazonratings` five-to-one-star Jellyfin rating-tag contract.
+- Prime Video card artwork as Jellyfin `backdrop`, clean hero artwork as `thumb`, transparent title artwork as `logo`, and episode images as matching `-thumb` files, while ignoring the duplicate title-composited covershot.
+- Local-only Prime Video matching with year-qualified series folders, safe media/subtitle renaming, season organization, collision refusal, exact generic-file episode handoffs, and complete series-root bundles.
+
 - PBS KIDS provider for public series, full-episode playlist, and episode watch pages, with current full-episode guide resolution from all three URL forms.
 - Requested PBS KIDS series and episode metadata: names, season/episode placement, type, separate short and full descriptions, runtime, premiere date, PBS KIDS video ID, legacy PBS media ID, and the exact `PBS KIDS Provider` tag.
 - PBS KIDS series transparent logos as Jellyfin `logo.png`, series card artwork as `thumb`, and matching episode images as `-thumb` artwork.
 - Local-only PBS KIDS Queue Mode matching with safe episode/subtitle renaming, season folders, parent-series bundles, collision refusal, and exact watch-page handoffs for generic completed filenames.
+- Post-success PBS KIDS cleanup for empty MediaFab timestamp folders, limited to folders containing nothing except `.DS_Store`.
 
 - Crunchyroll provider for public series and episode/watch pages using Crunchyroll's anonymous public catalog metadata.
 - Crunchyroll portrait poster, wide backdrop, transparent title logo, and smaller episode-thumbnail saving with Jellyfin-standard artwork names.

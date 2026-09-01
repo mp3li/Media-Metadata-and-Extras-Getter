@@ -5,6 +5,8 @@ import html
 import json
 import re
 import subprocess
+import concurrent.futures
+import datetime as dt
 import urllib.parse
 import urllib.request
 from html.parser import HTMLParser
@@ -12,22 +14,35 @@ from typing import Any
 
 
 NAME = "amazon.com"
+PRIME_NAME = "Amazon Prime Video"
 USER_AGENT = (
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
     "AppleWebKit/537.36 (KHTML, like Gecko) "
     "Chrome/125.0 Safari/537.36"
 )
 PAGE_HOSTS = {"amazon.com", "www.amazon.com"}
+PRIME_HOSTS = {"primevideo.com", "www.primevideo.com"}
 
 
 def is_supported_url(url: str) -> bool:
     parsed = urllib.parse.urlparse(clean_text(url))
-    return parsed.netloc.casefold() in PAGE_HOSTS and (
-        "/gp/video/detail/" in parsed.path or "/dp/" in parsed.path
+    host = parsed.netloc.casefold()
+    return (
+        host in PAGE_HOSTS
+        and ("/gp/video/detail/" in parsed.path or "/dp/" in parsed.path)
+    ) or (
+        host in PRIME_HOSTS
+        and bool(re.search(r"/(?:region/[^/]+/)?detail/[A-Z0-9]+", parsed.path, re.I))
     )
 
 
 def extract_metadata(url: str, timeout: int = 25) -> dict[str, Any]:
+    if urllib.parse.urlparse(clean_text(url)).netloc.casefold() in PRIME_HOSTS:
+        return extract_prime_metadata(url, timeout=timeout)
+    return extract_legacy_metadata(url, timeout=timeout)
+
+
+def extract_legacy_metadata(url: str, timeout: int = 25) -> dict[str, Any]:
     html_text = fetch_text(url, timeout=timeout)
     visible_lines = extract_visible_lines(html_text)
     video_object = extract_video_object(html_text)
@@ -96,32 +111,428 @@ def extract_metadata(url: str, timeout: int = 25) -> dict[str, Any]:
     }
 
 
+def extract_prime_metadata(url: str, timeout: int = 25) -> dict[str, Any]:
+    normalized = canonical_prime_url(url)
+    initial = prime_page(normalized, timeout=timeout)
+    state = prime_state(initial, "atf")
+    header = first_detail(state, "headerDetail")
+    if not header:
+        raise ValueError("Prime Video page did not expose public title metadata.")
+    requested_id = prime_compact_id(normalized)
+    season_links = prime_season_links(state, normalized)
+    pages: dict[str, dict[str, Any]] = {prime_compact_id(normalized): initial}
+
+    def load(item: tuple[int, str]) -> tuple[int, dict[str, Any]]:
+        season, season_url = item
+        compact_id = prime_compact_id(season_url)
+        page = pages.get(compact_id) or prime_page(season_url, timeout=timeout)
+        return season, page
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=min(4, max(1, len(season_links)))) as executor:
+        season_pages = sorted(executor.map(load, season_links), key=lambda item: item[0])
+    records: list[dict[str, Any]] = []
+    season_headers: list[tuple[int, dict[str, Any], str]] = []
+    for season_number, page in season_pages:
+        season_state = prime_state(page, "atf")
+        season_header = first_detail(season_state, "headerDetail")
+        season_url = next(url_value for number, url_value in season_links if number == season_number)
+        season_headers.append((season_number, season_header, season_url))
+        records.extend(prime_episode_records(page, season_number))
+    records = dedupe_records(records)
+    if not records:
+        raise ValueError("Prime Video page did not expose a public episode guide.")
+
+    selected_episode = next(
+        (record for record in records if clean_text(record.get("compact_id")) == requested_id),
+        None,
+    )
+    selected_header = header
+    selected_season = int_value(header.get("seasonNumber")) or season_headers[0][0]
+    series_source = next((season_url for number, _header, season_url in season_headers if number == selected_season), normalized)
+    trailer_url = prime_trailer_page_url(state, normalized)
+    series = prime_series_metadata(
+        selected_header, season_headers, records, series_source, trailer_url=trailer_url
+    )
+    if not selected_episode:
+        return series
+    return prime_episode_metadata(series, selected_episode, normalized)
+
+
+def prime_page(url: str, timeout: int) -> dict[str, Any]:
+    match = None
+    for _attempt in range(2):
+        text = fetch_text(url, timeout=timeout)
+        match = re.search(
+            r'<script[^>]+id=["\']dv-web-page-hydration-data["\'][^>]*>(.*?)</script>',
+            text,
+            re.I | re.S,
+        )
+        if match:
+            break
+    if not match:
+        raise ValueError("Prime Video page did not expose its public hydration data.")
+    value = json.loads(html.unescape(match.group(1)))
+    return value if isinstance(value, dict) else {}
+
+
+def prime_state(page: dict[str, Any], scope: str) -> dict[str, Any]:
+    value: Any = page
+    for key in ("init", "preparations", "body", scope, "state"):
+        value = value.get(key) if isinstance(value, dict) else None
+    return value if isinstance(value, dict) else {}
+
+
+def first_detail(state: dict[str, Any], bucket: str) -> dict[str, Any]:
+    details = state.get("detail") if isinstance(state.get("detail"), dict) else {}
+    values = details.get(bucket) if isinstance(details.get(bucket), dict) else {}
+    return next((value for value in values.values() if isinstance(value, dict)), {})
+
+
+def prime_season_links(state: dict[str, Any], fallback_url: str) -> list[tuple[int, str]]:
+    output: list[tuple[int, str]] = []
+    seasons = state.get("seasons") if isinstance(state.get("seasons"), dict) else {}
+    for choices in seasons.values():
+        if not isinstance(choices, list):
+            continue
+        for choice in choices:
+            if not isinstance(choice, dict):
+                continue
+            number = int_value(choice.get("sequenceNumber"))
+            link = absolute_prime_url(choice.get("seasonLink"))
+            if number and link:
+                output.append((number, link))
+    if not output:
+        output.append((int_value(first_detail(state, "headerDetail").get("seasonNumber")) or 1, fallback_url))
+    unique = {number: url for number, url in output}
+    return sorted(unique.items())
+
+
+def prime_episode_records(page: dict[str, Any], season_number: int) -> list[dict[str, Any]]:
+    btf = prime_state(page, "btf")
+    details_root = btf.get("detail") if isinstance(btf.get("detail"), dict) else {}
+    details = details_root.get("detail") if isinstance(details_root.get("detail"), dict) else {}
+    selves = btf.get("self") if isinstance(btf.get("self"), dict) else {}
+    actions_root = btf.get("action") if isinstance(btf.get("action"), dict) else {}
+    actions = actions_root.get("btf") if isinstance(actions_root.get("btf"), dict) else {}
+    episode_list = btf.get("episodeList") if isinstance(btf.get("episodeList"), dict) else {}
+    ids = episode_list.get("cardTitleIds") if isinstance(episode_list.get("cardTitleIds"), list) else list(details)
+    records: list[dict[str, Any]] = []
+    for gti in ids:
+        detail = details.get(gti) if isinstance(details.get(gti), dict) else {}
+        self_item = selves.get(gti) if isinstance(selves.get(gti), dict) else {}
+        if clean_text(detail.get("titleType")).casefold() != "episode":
+            continue
+        episode_number = int_value(detail.get("episodeNumber")) or int_value(self_item.get("sequenceNumber"))
+        images = detail.get("images") if isinstance(detail.get("images"), dict) else {}
+        action = actions.get(gti) if isinstance(actions.get(gti), dict) else {}
+        playback = prime_playback(action)
+        compact_id = first_non_empty(self_item.get("compactGTI"), prime_compact_id(self_item.get("link")))
+        link = absolute_prime_url(self_item.get("link"))
+        asins = [clean_text(value) for value in self_item.get("asins", []) if clean_text(value)] if isinstance(self_item.get("asins"), list) else []
+        records.append({
+            "id": clean_text(gti),
+            "compact_id": compact_id,
+            "asin": asins[0] if asins else "",
+            "asins": asins,
+            "url": link,
+            "season": season_number,
+            "episode": episode_number,
+            "title": clean_text(detail.get("title")),
+            "description": clean_text(detail.get("synopsis")),
+            "date": iso_date(detail.get("releaseDate")),
+            "year": clean_text(detail.get("releaseYear")),
+            "duration_seconds": int_value(detail.get("duration")) or int_value(playback.get("runTime")),
+            "runtime_minutes": runtime_minutes(detail),
+            "image": clean_text(images.get("packshot")),
+            "audio": text_list(detail.get("audioTracks")),
+            "subtitles": text_list(detail.get("subtitles")),
+            "features": prime_features(detail),
+        })
+    return [record for record in records if record["episode"] and record["title"]]
+
+
+def prime_playback(action: dict[str, Any]) -> dict[str, Any]:
+    primary = action.get("primaryActions") if isinstance(action.get("primaryActions"), list) else []
+    for item in primary:
+        if not isinstance(item, dict) or clean_text(item.get("actionType")) != "PLAY":
+            continue
+        payload = item.get("payload") if isinstance(item.get("payload"), dict) else {}
+        playback = payload.get("playback") if isinstance(payload.get("playback"), dict) else {}
+        return playback
+    return {}
+
+
+def prime_series_metadata(
+    selected: dict[str, Any],
+    season_headers: list[tuple[int, dict[str, Any], str]],
+    records: list[dict[str, Any]],
+    source_url: str,
+    trailer_url: str = "",
+) -> dict[str, Any]:
+    first_header = next((header for _number, header, _url in season_headers if header), selected)
+    title = first_non_empty(selected.get("parentTitle"), first_header.get("parentTitle"), strip_season(selected.get("title")))
+    images = selected.get("images") if isinstance(selected.get("images"), dict) else {}
+    contributors = selected.get("contributors") if isinstance(selected.get("contributors"), dict) else {}
+    rating = selected.get("amazonRating") if isinstance(selected.get("amazonRating"), dict) else {}
+    reviews = selected.get("reviews") if isinstance(selected.get("reviews"), dict) else {}
+    years = sorted({int_value(record.get("year")) for record in records if int_value(record.get("year"))})
+    latest_date = max((clean_text(record.get("date")) for record in records), default="")
+    fields: dict[str, list[str]] = {}
+    add_field(fields, "Audio", text_list(selected.get("audioTracks")))
+    add_field(fields, "Subtitles", text_list(selected.get("subtitles")))
+    add_field(fields, "Accessibility and playback features", prime_features(selected))
+    rating_asin = prime_review_asin(reviews)
+    compact_id = prime_compact_id(source_url)
+    add_field(fields, "Prime Video ID", compact_id)
+    add_field(fields, "Amazon rating ASIN", rating_asin)
+    tags = prime_provider_tags() + prime_rating_tags(rating, reviews)
+    return {
+        "source_url": source_url,
+        "source_site": PRIME_NAME,
+        "media_kind": "series",
+        "title": title,
+        "show_title": title,
+        "outline": clean_text(first_header.get("synopsis")),
+        "plot": clean_text(first_header.get("synopsis")),
+        "year": str(years[0]) if years else clean_text(first_header.get("releaseYear")),
+        "series_start_year": str(years[0]) if years else "",
+        "series_end_year": str(years[-1]) if years else "",
+        "series_is_current": is_current_release(latest_date),
+        "date": iso_date(first_header.get("releaseDate")),
+        "content_rating": clean_text((selected.get("ratingBadge") or {}).get("displayText")) if isinstance(selected.get("ratingBadge"), dict) else "",
+        "numeric_rating": clean_text(rating.get("value")),
+        "fanart_url": clean_text(images.get("packshot")),
+        "thumb_url": clean_text(images.get("heroshot")),
+        "logo_url": clean_text(images.get("titleLogo")),
+        "trailer_url": clean_text(trailer_url),
+        "production_label": "Studio",
+        "genres": named_values(selected.get("genres"), "text"),
+        "studios": text_list(selected.get("studios")),
+        "directors": named_values(contributors.get("directors"), "name"),
+        "credits": named_values(contributors.get("producers"), "name"),
+        "actors": [{"name": name, "role": ""} for name in named_values(contributors.get("cast"), "name")],
+        "tags": tags,
+        "unique_ids": {key: value for key, value in (("primevideo", compact_id), ("amazon", rating_asin)) if value},
+        "extra_fields": fields,
+        "series_episodes": records,
+        "folder_name_override": title,
+    }
+
+
+def prime_episode_metadata(series: dict[str, Any], record: dict[str, Any], source_url: str) -> dict[str, Any]:
+    fields: dict[str, list[str]] = {}
+    add_field(fields, "Prime Video ID", record.get("compact_id"))
+    add_field(fields, "Prime Video GTI", record.get("id"))
+    add_field(fields, "Amazon ASIN", record.get("asin"))
+    add_field(fields, "Runtime seconds", record.get("duration_seconds"))
+    add_field(fields, "Audio", record.get("audio"))
+    add_field(fields, "Subtitles", record.get("subtitles"))
+    add_field(fields, "Accessibility and playback features", record.get("features"))
+    return {
+        "source_url": source_url,
+        "source_site": PRIME_NAME,
+        "media_kind": "episode",
+        "title": series.get("title", ""),
+        "show_title": series.get("title", ""),
+        "season_number": str(record.get("season", "")),
+        "episode_number": str(record.get("episode", "")),
+        "episode_title": record.get("title", ""),
+        "outline": record.get("description", ""),
+        "plot": record.get("description", ""),
+        "date": record.get("date", ""),
+        "year": record.get("year", ""),
+        "series_start_year": series.get("series_start_year", ""),
+        "series_end_year": series.get("series_end_year", ""),
+        "series_is_current": bool(series.get("series_is_current")),
+        "runtime_minutes": record.get("runtime_minutes", ""),
+        "content_rating": series.get("content_rating", ""),
+        "thumb_url": record.get("image", ""),
+        "tags": list(series.get("tags", [])),
+        "studios": list(series.get("studios", [])),
+        "genres": list(series.get("genres", [])),
+        "unique_ids": {
+            key: value for key, value in (
+                ("primevideo", clean_text(record.get("compact_id"))),
+                ("primevideo-gti", clean_text(record.get("id"))),
+                ("amazon", clean_text(record.get("asin"))),
+            ) if value
+        },
+        "extra_fields": fields,
+        "series_episodes": list(series.get("series_episodes", [])),
+        "series_metadata": series,
+        "folder_name_override": series.get("title", ""),
+    }
+
+
+def prime_provider_tags() -> list[str]:
+    return ["Prime Video", "Provider: Prime Video", "Amazon Prime Video Provider"]
+
+
+def prime_rating_tags(rating: dict[str, Any], reviews: dict[str, Any]) -> list[str]:
+    value = clean_text(rating.get("value"))
+    count = clean_text(rating.get("countFormatted") or rating.get("count"))
+    output = [f"amazonratings: {value} / 5 from {count} ratings"] if value and count else []
+    model = reviews.get("reviewsAnalysisModel") if isinstance(reviews.get("reviewsAnalysisModel"), dict) else {}
+    histogram = model.get("ratingsHistogram") if isinstance(model.get("ratingsHistogram"), dict) else {}
+    names = (("fiveStar", "amazonrating5stars"), ("fourStar", "amazonrating4stars"), ("threeStar", "amazonrating3stars"), ("twoStar", "amazonrating2stars"), ("oneStar", "amazonrating1star"))
+    for key, label in names:
+        item = histogram.get(key) if isinstance(histogram.get(key), dict) else {}
+        percentage = clean_text(item.get("percentageDisplay"))
+        if percentage:
+            output.append(f"{label}: {percentage}")
+    return output
+
+
+def prime_features(detail: dict[str, Any]) -> list[str]:
+    values = []
+    if detail.get("isClosedCaption"):
+        values.append("Closed Captions")
+    if any("audio description" in value.casefold() for value in text_list(detail.get("audioTracks"))):
+        values.append("Audio Description")
+    for key, label in (("isDolby51", "Dolby 5.1"), ("isDolbyAtmos", "Dolby Atmos"), ("isDolbyVision", "Dolby Vision"), ("isHdr", "HDR"), ("isHdr10Plus", "HDR10+"), ("isUhd", "UHD"), ("isXRay", "X-Ray"), ("isPrime", "Included with Prime")):
+        if detail.get(key):
+            values.append(label)
+    return values
+
+
+def prime_review_asin(reviews: dict[str, Any]) -> str:
+    return first_non_empty(
+        match_group(r"/product-reviews/([A-Z0-9]{10})", clean_text(reviews.get("allReviewsLink"))),
+        match_group(r"[?&]asin=([A-Z0-9]{10})", clean_text(reviews.get("createReviewLink"))),
+    )
+
+
+def prime_trailer_page_url(state: dict[str, Any], base_url: str) -> str:
+    """Return Prime's explicitly labelled public trailer page, never a normal play action."""
+    stack: list[Any] = [state.get("action")]
+    while stack:
+        value = stack.pop()
+        if isinstance(value, dict):
+            if value.get("isTrailer") is True:
+                playback_url = clean_text(value.get("playbackURL"))
+                if playback_url:
+                    absolute = urllib.parse.urljoin(base_url, html.unescape(playback_url))
+                    parsed = urllib.parse.urlsplit(absolute)
+                    query = urllib.parse.parse_qsl(parsed.query, keep_blank_values=True)
+                    if not any(key.casefold() == "autoplay" for key, _item in query):
+                        query.append(("autoplay", "trailer"))
+                    return urllib.parse.urlunsplit(
+                        (parsed.scheme, parsed.netloc, parsed.path, urllib.parse.urlencode(query), "")
+                    )
+            stack.extend(value.values())
+        elif isinstance(value, list):
+            stack.extend(value)
+    return ""
+
+
+def canonical_prime_url(url: str) -> str:
+    parsed = urllib.parse.urlsplit(clean_text(url))
+    match = re.search(r"/(?:region/([^/]+)/)?detail/([A-Z0-9]+)", parsed.path, re.I)
+    if not match:
+        return clean_text(url)
+    region = match.group(1) or "na"
+    return f"https://www.primevideo.com/region/{region}/detail/{match.group(2).upper()}"
+
+
+def absolute_prime_url(value: Any) -> str:
+    text = html.unescape(clean_text(value)).replace("\\u0026", "&")
+    if not text:
+        return ""
+    return canonical_prime_url(urllib.parse.urljoin("https://www.primevideo.com", text))
+
+
+def prime_compact_id(value: Any) -> str:
+    match = re.search(r"/detail/([A-Z0-9]+)", clean_text(value), re.I)
+    return match.group(1).upper() if match else ""
+
+
+def runtime_minutes(detail: dict[str, Any]) -> str:
+    seconds = int_value(detail.get("duration"))
+    if seconds:
+        return str(max(1, round(seconds / 60)))
+    return parse_runtime([clean_text(detail.get("runtime"))])
+
+
+def iso_date(value: Any) -> str:
+    text = clean_text(value)
+    if not text:
+        return ""
+    for pattern in ("%b %d, %Y", "%B %d, %Y", "%Y-%m-%d"):
+        try:
+            return dt.datetime.strptime(text, pattern).date().isoformat()
+        except ValueError:
+            continue
+    return text
+
+
+def is_current_release(value: str) -> bool:
+    try:
+        latest = dt.date.fromisoformat(value)
+    except ValueError:
+        return False
+    today = dt.datetime.now(dt.timezone.utc).date()
+    return 0 <= (today - latest).days <= 180
+
+
+def strip_season(value: Any) -> str:
+    return re.sub(r"\s*-?\s*Season\s+\d+\s*$", "", clean_text(value), flags=re.I)
+
+
+def named_values(value: Any, key: str) -> list[str]:
+    return dedupe(item.get(key) for item in value if isinstance(item, dict)) if isinstance(value, list) else []
+
+
+def text_list(value: Any) -> list[str]:
+    return dedupe(value if isinstance(value, list) else [value])
+
+
+def add_field(fields: dict[str, list[str]], label: str, values: Any) -> None:
+    for value in text_list(values):
+        if value.casefold() not in {item.casefold() for item in fields.get(label, [])}:
+            fields.setdefault(label, []).append(value)
+
+
+def int_value(value: Any) -> int:
+    try:
+        return int(float(clean_text(value)))
+    except ValueError:
+        return 0
+
+
+def dedupe_records(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    unique = {(int_value(record.get("season")), int_value(record.get("episode"))): record for record in records}
+    return [unique[key] for key in sorted(unique) if all(key)]
+
+
 def fetch_text(url: str, timeout: int = 25) -> str:
+    result = subprocess.run(
+        [
+            "/usr/bin/curl",
+            "--location",
+            "--silent",
+            "--show-error",
+            "--compressed",
+            "--retry",
+            "2",
+            "--retry-all-errors",
+            "--max-time",
+            str(timeout),
+            "--user-agent",
+            USER_AGENT,
+            url,
+        ],
+        capture_output=True,
+        check=False,
+        text=True,
+    )
+    if result.returncode == 0 and result.stdout:
+        return result.stdout
     request = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
     try:
         with urllib.request.urlopen(request, timeout=timeout) as response:
             return response.read().decode("utf-8", errors="replace")
-    except Exception:
-        result = subprocess.run(
-            [
-                "/usr/bin/curl",
-                "--location",
-                "--silent",
-                "--show-error",
-                "--compressed",
-                "--max-time",
-                str(timeout),
-                "--user-agent",
-                USER_AGENT,
-                url,
-            ],
-            capture_output=True,
-            check=False,
-            text=True,
-        )
-        if result.returncode != 0:
-            raise RuntimeError(result.stderr.strip() or f"curl exited with {result.returncode}")
-        return result.stdout
+    except Exception as exc:
+        raise RuntimeError(result.stderr.strip() or str(exc) or f"curl exited with {result.returncode}") from exc
 
 
 class VisibleTextParser(HTMLParser):

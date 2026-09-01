@@ -227,6 +227,24 @@ class PBSKidsProviderTests(unittest.TestCase):
             (unrelated / "S07E17 Another Show.mp4").write_bytes(b"video")
             self.assertEqual(base.pbs_kids_media_groups(meta, {"media_folders": [temp]}), [])
 
+    def test_cleanup_removes_only_empty_mediafab_timestamp_folders(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            removable = root / "wilk720-ep_2026-08-29_21-46-55"
+            removable.mkdir()
+            (removable / ".DS_Store").write_bytes(b"finder")
+            occupied = root / "wilk713-ep_2026-08-29_21-46-15"
+            occupied.mkdir()
+            (occupied / ".DS_Store").write_bytes(b"finder")
+            (occupied / "keep.txt").write_text("keep", encoding="utf-8")
+            unrelated = root / "My Empty Folder"
+            unrelated.mkdir()
+            removed = base.cleanup_pbs_kids_handoff_folders(str(root))
+            self.assertEqual(removed, [removable])
+            self.assertFalse(removable.exists())
+            self.assertTrue(occupied.exists())
+            self.assertTrue(unrelated.exists())
+
 
 if __name__ == "__main__":
     unittest.main()

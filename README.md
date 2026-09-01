@@ -30,8 +30,10 @@
 - [How to Use the Tool](#how-to-use-the-tool)
 - [Importing mylinks.txt](#importing-mylinkstxt)
 - [Settings](#settings)
+- [Amazon Prime Video Series Mode](#amazon-prime-video-series-mode)
 - [BBC Series Mode](#bbc-series-mode)
 - [Disney+ Series Mode](#disney-series-mode)
+- [HBO Max Series Mode](#hbo-max-series-mode)
 - [Paramount+ Series Mode](#paramount-series-mode)
 - [Crunchyroll Series Mode](#crunchyroll-series-mode)
 - [PBS KIDS Series Mode](#pbs-kids-series-mode)
@@ -52,7 +54,7 @@ Media Metadata and Extras Getter is a macOS Python tool that collects public met
 
 For a version of this tool specifically made for live performances, including Amazon Prime Video, OperaVision, Metropolitan Opera, BroadwayHD, MarqueeTV, PBS Great Performances, Disney+, and Netflix, check out [Live Performance Metadata and Extras Getter](https://github.com/mp3li/Live-Performance-Metadata-and-Extras-Getter).
 
-Media Metadata and Extras Getter gathers information that supported public detail pages expose and saves it as a local metadata bundle: an NFO file plus available artwork, trailers, gallery images, and extra videos. It currently supports public detail pages from Amazon Prime Video, Netflix, Disney+, BBC iPlayer, Paramount+, Crunchyroll, and PBS KIDS.
+Media Metadata and Extras Getter gathers information that supported public detail pages expose and saves it as a local metadata bundle: an NFO file plus available artwork, trailers, gallery images, and extra videos. It currently supports public detail pages from Amazon Prime Video, Netflix, Disney+, HBO Max, BBC iPlayer, Paramount+, Crunchyroll, and PBS KIDS.
 
 The filenames and folder layout are designed to work especially well with Jellyfin's local-metadata conventions. The output is not locked to Jellyfin, though: the files stay local, use a standard XML NFO structure, and can also support your own organized media folders or other software that reads local NFO files and artwork.
 
@@ -85,9 +87,10 @@ This tool can also serve as the metadata stage of [MediaFab](https://github.com/
 
 The current provider scripts support these public detail-page links:
 
-- Amazon Prime Video detail pages on `amazon.com`
+- Amazon Prime Video detail pages on `primevideo.com`, plus the existing Amazon video detail-page forms on `amazon.com`
 - Netflix title pages
 - Disney+ browse entity and episode `/play/...` pages
+- HBO Max movie, show, and public show-episode catalog pages; `play.hbomax.com` movie/show links are normalized to their public catalog pages
 - BBC iPlayer episode pages, including episodes in a series and one-off programmes such as films or plays
 - Paramount+ show, season, episode, movie, and public clip pages
 - Crunchyroll series and episode/watch pages
@@ -105,10 +108,14 @@ Coverage depends on what the provider exposes in the public page data for each i
 
 ### Amazon Prime Video
 
-- title, plot, year, runtime, content rating, genres, studio, directors, producers, and cast when exposed
-- Amazon identifier when available
-- poster and wide artwork
-- a direct trailer only when a usable direct media URL is exposed
+- movie metadata from the existing supported Amazon detail-page forms, including title, plot, year, runtime, rating, genres, studio, directors, producers, cast, identifiers, and exposed artwork
+- Prime Video season and exact episode detail links, including complete public multi-season guides, parent-series resolution, episode titles and placements, synopses, dates, exact runtimes, Prime Video IDs, GTIs, ASINs, audio languages, subtitle languages, and accessibility/playback features
+- series rating and review total plus the ordered five-to-one-star breakdown using the exact `amazonratings` and `amazonrating5stars` through `amazonrating1star` Jellyfin tag contract
+- the exact `Amazon Prime Video Provider` tag on every Prime Video series and episode NFO
+- Prime Video's card artwork as Jellyfin `backdrop`, its clean hero image as `thumb`, its transparent title art as `logo`, and each episode image as its matching `-thumb`; the duplicate title-composited wide `covershot` is deliberately ignored and no portrait poster is invented
+- an exact episode detail link resolves its parent season and complete series guide, ensuring that an episode is never written without its series-root `tvshow.nfo` and available series artwork
+- year-qualified series roots, local-only episode matching, safe media/subtitle renaming, season organization, collision refusal, and no-double-nesting behavior consistent with Crunchyroll, Paramount+, Disney+, and PBS KIDS
+- Prime Video's explicitly labelled public trailer page is attempted last and saved as `trailers/trailer.mp4` only when a usable clear preview stream can be resolved; failure to resolve the optional trailer does not affect metadata or other providers
 
 ### Netflix
 
@@ -128,6 +135,20 @@ Coverage depends on what the provider exposes in the public page data for each i
 - Disney+ movies use `Output/Disney+/Movie Title (Year)/` during ordinary link processing. A MediaFab handoff instead keeps the movie beneath the supplied media location as `Movie Title (Year)/`; local movie and subtitle sidecars are moved and renamed only after collision validation
 - a provider-exposed direct trailer, when one exists, is saved under Jellyfin's native `trailers/trailer.mp4`; a Disney+ `/play/...` webpage is never mistaken for downloadable trailer media, and no YouTube fallback is used
 
+### HBO Max
+
+- movie, series, and episode titles; separate short `outline` and full `plot` descriptions; release year/date; runtime when public; complete genres plus primary and secondary genres; provider brand; content rating; rating authority and descriptor codes; cast, director, writer, producer, creator, and source-material credits; and exact Max IDs
+- complete public season and episode guides assembled by MME from Max's catalog pages, with season IDs, per-season counts, total season/episode counts, episode UUIDs, placements, titles, separate short/full descriptions, public URLs, availability dates, and one landscape episode thumbnail
+- episode premiere date, runtime, audio languages, and subtitle languages when those exact fields are exposed; Max availability dates are retained separately and are never relabeled as original air dates
+- the exact `HBO Max Provider` tag on every HBO Max movie, series, and episode NFO
+- one clean provider portrait as Jellyfin `poster`, one provider wide image as `backdrop`, horizontal title art as `thumb`, centered title art as `logo`, and the selected secondary series/movie backdrop under `extrafanart`; episodes receive only one landscape `-thumb` and never receive episode posters or alternate covers
+- movies use `Movie Title (Year)/`; series use `Series Title (Year)`, `Series Title (Start Year-End Year)`, or `Series Title (Start Year-)` with `tvshow.nfo` beside `S01`, `S02`, and later folders
+- Queue Mode uses the public guide only as an identity table: a Max episode UUID in the completed filename can be matched to exactly one guide entry, and only locally present episodes are renamed, organized, and written; no duration or queue-order guessing is used
+- provider trailer title, description, program ID, and exact public trailer page are retained when exposed; public Max free/creative trailers and selected extra-video pages are resolved only at the end of the workflow and saved in Jellyfin's native `trailers/` and `Extras/Videos/` locations only when their HLS/DASH manifests are clear and contain no content-protection declaration
+- the signed-in player may display audio and subtitle lists that the anonymous public catalog omits; missing private player fields are not invented
+- MME supplies the complete show catalog used by Queue Mode; MediaFab only needs to preserve each Max episode UUID in the completed filename and pass the show URL once for that queue
+- a standalone `play.hbomax.com/video/watch/<episode-id>` page publicly exposes only the episode UUID and cannot bootstrap its unknown parent show by itself; an exact public `/show/.../<episode-id>` catalog URL can identify a single episode directly
+
 ### BBC iPlayer
 
 - title, full/medium/short/programme synopses, first broadcast, release date, duration, BBC channel, category, version, availability, and public BBC identifiers when exposed
@@ -138,14 +159,16 @@ Coverage depends on what the provider exposes in the public page data for each i
 
 ### Paramount+
 
-- show title, description, genre, year, season count, TV rating, brand, Paramount+ show ID, public episode URLs, and every public season/episode guide entry
-- episode title, season/episode number, synopsis, date, duration where Paramount+ exposes it, public episode ID, and available episode artwork
+- show title, description, complete genres, year, season count, per-season episode counts, total episode count, TV rating, brand, Paramount+ show ID, public episode URLs, and every public season/episode guide entry
+- episode title, season/episode number, synopsis, date, duration where Paramount+ exposes it, public episode ID, available episode artwork, and exact audio/subtitle languages when a public page exposes them
 - the exact `Paramount+ Provider` tag on every Paramount+ NFO, alongside the existing source/provider tags
 - show portrait as Jellyfin `poster`, wide hero artwork as `backdrop`, and title art as `logo` at the series root; each local episode receives its own full-resolution `-thumb` image
-- a playing-page URL resolves its public parent-show page and carries the complete show metadata into the save, so an episode is never written without `tvshow.nfo` and available series artwork beside its season folders
+- MME builds the complete Paramount+ catalog from one show link for Queue Mode; exact episode IDs preserved in completed filenames outrank stale `SxxExx` text, while recognized season/episode placement remains the fallback
+- a playing-page URL resolves its public parent-show page and carries the complete show catalog and metadata into the save, so an episode is never written without `tvshow.nfo` and available series artwork beside its season folders
 - Jellyfin series folders named `Series Title (Year)` for a completed single-year run, `Series Title (Start Year-End Year)` for a completed multi-year run, or `Series Title (Start Year-)` while currently airing
-- one provider-supplied public preview, when available and confirmed clear, under Jellyfin's native `trailers/trailer.mp4` layout; Paramount+ never uses the Crunchyroll YouTube fallback
-- movie pages add feature-film synopsis, runtime, rating, genre, cast, movie ID, title/logo/hero/brand artwork, and their autoplaying public preview.
+- one provider-supplied public preview, when available and confirmed clear, under Jellyfin's native `trailers/trailer.mp4` layout; provider-exposed public extras use `Extras/Videos/`, both run last, and Paramount+ never uses the Crunchyroll YouTube fallback
+- movie pages add feature-film synopsis, runtime, rating, genre, cast/credit, movie ID, distinct provider poster/backdrop/title-logo roles, and their autoplaying public preview; a MediaFab handoff remains beneath the explicitly supplied location instead of being redirected to the default output directory
+- title logos are byte-checked and converted to genuine PNG when necessary; a single source image is never duplicated into invented movie poster, fanart, banner, and landscape roles
 - public clip pages add clip title, synopsis, duration, date, rating, full-resolution artwork, public manifest, and exposed caption status. A clear DASH or HLS manifest is saved only when it contains no DRM declaration; the provider uses ordinary `ffmpeg` remuxing without keys or DRM tooling.
 - the Korra preview currently advertises `CLOSED-CAPTIONS=NONE`; subscription feature/episode playback and any subtitle tracks behind it are not downloaded by this tool.
 
@@ -170,6 +193,7 @@ Coverage depends on what the provider exposes in the public page data for each i
 - the series transparent logo as Jellyfin `logo.png`, the provider's series card artwork as Jellyfin `thumb`, and each episode image as its matching `-thumb`
 - a series, full-episode playlist, or episode watch URL resolves the same currently available full-episode guide; an episode watch URL also identifies the exact completed episode and carries its parent series metadata into the save
 - local-only episode matching, safe media/subtitle renaming, season organization, collision refusal, and no-double-nesting behavior consistent with the Crunchyroll, Paramount+, and Disney+ series workflows
+- after a successful handoff, proven-empty MediaFab timestamp folders containing nothing except `.DS_Store` are removed; folders with any other content and ordinary user-created empty folders are preserved
 - PBS KIDS video is not downloaded. This provider retrieves the requested public catalog metadata and artwork only.
 
 ## Requirements
@@ -198,6 +222,10 @@ These optional programs are not checked at startup and are never invoked for ano
 ### Optional Paramount+ preview requirement
 
 **FFmpeg** is used only when Paramount+ exposes a public, unencrypted HLS or DASH preview. If FFmpeg is absent, the preview times out, or the manifest declares encryption or content protection, only the optional trailer is skipped; metadata, artwork, naming, subtitle sidecars, season organization, and other providers continue normally.
+
+### Optional HBO Max preview and extra-video requirements
+
+**Google Chrome** is used only to observe public free/creative media requests made by HBO Max trailer and selected extra-video pages. **FFmpeg** remuxes those previews into Jellyfin's `trailers/` or `Extras/Videos/` layout only after the tool verifies that the public HLS/DASH manifest declares no encryption or content protection. If Chrome or FFmpeg is absent, Max exposes no preview, or the stream is protected, only the optional trailer/extra is skipped; metadata, artwork, naming, subtitles, season organization, and every other provider continue normally.
 
 ## How to Run
 
@@ -349,6 +377,21 @@ S01E01 The Legend of Korra - Welcome to Republic City.mp4
 
 Use an individual Paramount+ playing-page URL when naming a generic capture: that link identifies the one completed episode and resolves its parent show automatically. A show link intentionally lists every episode, so a timestamp-only filename does not identify which one was captured. The series guide is used only to match episodes that actually exist locally; it does not create metadata or artwork for missing episodes.
 
+### Amazon Prime Video series settings
+
+Prime Video series processing is enabled by default. A season page builds the complete public multi-season guide, while an exact episode detail link safely identifies one newly completed generic file and carries the parent-series metadata into the save.
+
+```json
+"amazon_prime_series_metadata_enabled": true,
+"amazon_prime_series_rename_enabled": true,
+"amazon_prime_series_organize_enabled": true
+```
+
+- `amazon_prime_series_rename_enabled` renames matched episodes and existing subtitle sidecars to `S01E01 Show Title - Episode Title` while preserving the complete subtitle suffix.
+- `amazon_prime_series_organize_enabled` places those files beneath the year-qualified series root in `S01`, `S02`, and later season folders.
+- Every destination is validated before a two-phase move. Existing conflicts stop the operation rather than being overwritten.
+- Set either file-action setting to `false` to disable that action. Set `amazon_prime_series_metadata_enabled` to `false` to use ordinary single-page output.
+
 ### Disney+ series mode
 
 Disney+ series mode uses the same Jellyfin layout and safety contract as Crunchyroll and Paramount+. A `/play/...` URL identifies the exact episode and resolves the canonical `/browse/entity-...` series page automatically:
@@ -380,9 +423,45 @@ Subtitle sidecars retain the complete suffix following the original media stem, 
 - `disneyplus_series_organize_enabled` places those files beneath the correct year-qualified series root and season folder.
 - Set either file-action setting to `false` to disable that action. Set `disneyplus_series_metadata_enabled` to `false` to use ordinary single-page output.
 
+### HBO Max series mode
+
+HBO Max series processing follows the same local-only Jellyfin contract as Crunchyroll, Disney+, Paramount+, and Prime Video:
+
+```text
+Series Title (Start Year-)/
+  tvshow.nfo
+  poster.jpg
+  backdrop.jpg
+  thumb.jpg
+  logo.png
+  extrafanart/
+    fanart-01.jpg
+  trailers/
+    trailer.mp4
+  S01/
+    S01E01 Series Title - Episode Title.mkv
+    S01E01 Series Title - Episode Title.en.srt
+    S01E01 Series Title - Episode Title.nfo
+    S01E01 Series Title - Episode Title-thumb.jpg
+```
+
+The guide is a lookup table, not an instruction to create missing episodes. MME builds that complete guide from the show page; Queue Mode only needs to pass that show page and preserve each Max episode UUID in its completed filename. The tool matches that UUID to the exact guide record, and the UUID takes priority over a stale `S01E01` string. Recognized `S01E01`-style placements also work when no UUID is present. Anonymous files without a UUID or placement are left untouched instead of being guessed from duration or queue order.
+
+```json
+"hbomax_series_metadata_enabled": true,
+"hbomax_series_rename_enabled": true,
+"hbomax_series_organize_enabled": true
+```
+
+- `hbomax_series_rename_enabled` renames the matched episode and its existing subtitle sidecars to `S01E01 Show Title - Episode Title`, preserving the complete subtitle suffix.
+- `hbomax_series_organize_enabled` places those files in `S01`, `S02`, and later folders under the year-qualified series root.
+- Every destination is validated before the two-phase move; conflicts stop the operation instead of replacing files.
+- Each episode receives exactly one landscape `-thumb`. Episode posters, square covers, alternate episode art, and invented artwork roles are not created.
+- Set either file-action setting to `false` to disable that action. Set `hbomax_series_metadata_enabled` to `false` to use ordinary single-page output.
+
 ### Paramount+ series mode
 
-Paramount+ series mode now produces the same Jellyfin layout and safety guarantees as Crunchyroll, using Paramount+'s own public metadata and preview media:
+Paramount+ series mode produces the same Jellyfin layout and safety guarantees as Crunchyroll and HBO Max, using Paramount+'s own public metadata and preview media:
 
 ```text
 Series Title (Start Year-)/
@@ -399,7 +478,9 @@ Series Title (Start Year-)/
     S01E01 Series Title - Episode Title-thumb.jpg
 ```
 
-The playing-page handoff is the safest MediaFab/WidevineProxy2 route: pass that page URL and the exact newly completed media file when possible. The tool gives that one file the page's season and episode placement even when its temporary name is only `manifest_...`. Subtitle sidecars retain their complete existing suffix after the old video stem, so provider language labels such as `.en_us.srt` are preserved and distinct tracks are neither guessed nor deleted.
+For Queue Mode, pass the Paramount+ show page once and preserve each episode's Paramount+ ID in its completed filename. MME builds the complete multi-season catalog and matches those IDs itself; an exact ID takes priority over stale season/episode text. A recognized placement such as `S01E01` remains the fallback when no ID is present. The guide is only an identity table, so missing local episodes receive no files and an unmatched queue cannot fall back to generic guide-only output.
+
+An individual playing-page handoff also remains supported: pass that page URL and the exact newly completed media file when processing one episode. The tool gives that file the page's season and episode placement even when its temporary name is only `manifest_...`, and the playing page carries the complete parent catalog. Subtitle sidecars retain their complete existing suffix after the old video stem, so provider language labels such as `.en_us.srt` are preserved and distinct tracks are neither guessed nor deleted.
 
 For configured broad media roots, matching is stricter: the path must contain the show title and the file must use a recognized placement such as `S01E01`, `S1 E1`, `Season 1 Episode 1`, `Series 1 Episode 1`, `1x01`, or `01-01`. This prevents an unrelated show's `S01E01` from being claimed. Existing destinations are validated before a two-phase move, conflicts stop the operation, and an existing series root is reused instead of nested.
 
@@ -411,6 +492,7 @@ For configured broad media roots, matching is stricter: the path must contain th
 
 - `paramountplus_series_rename_enabled` renames the episode and its subtitle sidecars to the public `S01E01 Show Title - Episode Title` identity.
 - `paramountplus_series_organize_enabled` places them in the correct `S01`, `S02`, or later folder beneath the year-qualified series root.
+- Every episode receives exactly one landscape `-thumb`; episode posters, alternate covers, and gallery artwork are not created.
 - Set either file-action setting to `false` to disable that action. Set `paramountplus_series_metadata_enabled` to `false` to use ordinary single-page output.
 
 ### Crunchyroll series settings
@@ -443,6 +525,7 @@ PBS KIDS series processing is enabled by default. All three supported PBS KIDS U
 - `pbs_kids_series_rename_enabled` renames matched episodes and their existing subtitle sidecars to `S07E17 Show Title - Episode Title`.
 - `pbs_kids_series_organize_enabled` places those files beneath the series root in `S01`, `S02`, and later season folders.
 - Every destination is checked before a two-phase rename or move, so an existing file is never overwritten.
+- After the metadata workflow succeeds, timestamp-named MediaFab handoff folders are removed only when they contain nothing except `.DS_Store`.
 - Set either file-action setting to `false` to disable that action. Set `pbs_kids_series_metadata_enabled` to `false` to use ordinary single-page output.
 
 ### Paramount+ movie folders
@@ -491,6 +574,42 @@ It also recognises the normalized names it produces, such as `S02E07 The Great B
 - Set `bbc_series_rename_enabled` to `true` to rename matching local videos to `S01E07 The Great British Sewing Bee.mp4`. Matching subtitle files are renamed alongside the video; when the original filename does not establish the subtitle language, the safe `und` language code is used, for example `S01E07 The Great British Sewing Bee.und.srt`.
 - Set `bbc_series_organize_enabled` to `true` to move the matching video and subtitle files into `S01`, `S02`, and so on within their existing parent folder. Every episode gets its own NFO, while the public BBC artwork bundle is saved only once per season with a show-specific name, such as `The Great British Sewing Bee - season01-poster.jpg` and `The Great British Sewing Bee - season01-fanart.jpg`.
 - Both actions are deliberately opt-in. The tool will not overwrite a conflicting destination filename.
+
+## Amazon Prime Video Series Mode
+
+Provide a Prime Video season page to match every locally present episode across its public season selector, or provide an exact episode detail page for one completed file. Prime Video episode pages use the same `/detail/...` form as seasons, but their compact Prime Video ID identifies the selected episode while the page still exposes its parent season and full series guide.
+
+The resulting Jellyfin layout is:
+
+```text
+Making The Cut (2020-2022)/
+  tvshow.nfo
+  backdrop.jpg
+  thumb.jpg
+  logo.png
+  S01/
+    S01E01 Making The Cut - Heidi and Tim Are Back.mkv
+    S01E01 Making The Cut - Heidi and Tim Are Back.en.srt
+    S01E01 Making The Cut - Heidi and Tim Are Back.nfo
+    S01E01 Making The Cut - Heidi and Tim Are Back-thumb.jpg
+```
+
+Series folders use `Series Title (Year)` for a single completed year, `Series Title (Start Year-End Year)` for a completed multi-year run, or `Series Title (Start Year-)` for a currently releasing series. An existing title-only or stale year-qualified root is migrated safely rather than nested.
+
+A Queue Mode folder can match episodes by SxxExx placement, title, compact Prime Video ID, GTI, or ASIN. The guide is only a lookup table: missing local episodes do not receive NFO files or images, and multiple anonymous timestamp-only files remain untouched because they cannot be assigned safely. An exact episode link plus one exact completed file is unambiguous even when that file still has a generic `manifest_...` name.
+
+The rating tags are written together and in this exact order for Jellyfin plugin consumption:
+
+```xml
+<tag>amazonratings: 3.8 / 5 from 280 ratings</tag>
+<tag>amazonrating5stars: 51%</tag>
+<tag>amazonrating4stars: 18%</tag>
+<tag>amazonrating3stars: 5%</tag>
+<tag>amazonrating2stars: 13%</tag>
+<tag>amazonrating1star: 13%</tag>
+```
+
+The values come from the selected Prime Video detail page and can change; the tag names and ordering remain fixed. Series artwork uses only the clean hero `backdrop`, card `thumb`, and transparent `logo`. Episode images use the matching `-thumb` name.
 
 ## BBC Series Mode
 
@@ -647,7 +766,7 @@ When media matching finds a local video, the real filename replaces `<title>` in
 
 ## Metadata Written to the NFO
 
-The generated NFO has a `<movie>` root for films/one-off programmes, a `<tvshow>` root for Disney+, Paramount+, Crunchyroll, and PBS KIDS series pages, or an `<episodedetails>` root for matched episodes, and can include:
+The generated NFO has a `<movie>` root for films/one-off programmes, a `<tvshow>` root for Amazon Prime Video, Disney+, HBO Max, Paramount+, Crunchyroll, and PBS KIDS series pages, or an `<episodedetails>` root for matched episodes, and can include:
 
 - title, original title, sort title, outline, plot, tagline, year, and date
 - runtime, rating, content rating, and language
@@ -687,13 +806,16 @@ Provider Scripts/
   bbc_iplayer.py
   crunchyroll.py
   disneyplus.py
+  hbomax.py
   netflix.py
   paramountplus.py
   pbs_kids.py
 
 Tests/
+  test_amazon_prime.py
   test_crunchyroll.py
   test_disneyplus.py
+  test_hbomax.py
   test_paramountplus.py
   test_pbs_kids.py
 
