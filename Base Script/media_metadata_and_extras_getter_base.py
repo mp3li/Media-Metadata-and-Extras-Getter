@@ -4940,6 +4940,407 @@ def process_manual_links(links: list[str], settings: dict[str, Any]) -> None:
     )
 
 
+UNSHACKLE_SERVICE_ALIASES = {
+    "AMAZON": "amazon",
+    "AMAZONPRIME": "amazon",
+    "AMAZONPRIMEVIDEO": "amazon",
+    "AMZN": "amazon",
+    "BBC": "bbc",
+    "BBCIP": "bbc",
+    "BBCIPLAYER": "bbc",
+    "CR": "crunchyroll",
+    "CRUNCHYROLL": "crunchyroll",
+    "DISNEY": "disneyplus",
+    "DISNEYPLUS": "disneyplus",
+    "DSNP": "disneyplus",
+    "HBO": "hbomax",
+    "HBOMAX": "hbomax",
+    "HMAX": "hbomax",
+    "MAX": "hbomax",
+    "NETFLIX": "netflix",
+    "NF": "netflix",
+    "PARAMOUNT": "paramountplus",
+    "PARAMOUNTPLUS": "paramountplus",
+    "PMTP": "paramountplus",
+    "PRIME": "amazon",
+    "PRIMEVIDEO": "amazon",
+}
+
+
+def unshackle_service_key(value: str) -> str:
+    return re.sub(r"[^A-Z0-9]+", "", clean_text(value).upper())
+
+
+def unshackle_detail_link(service: str, title_id: str, season: str = "", detail_link: str = "") -> str:
+    """Resolve Unshackle's service/title identity to one supported public detail page."""
+    explicit = clean_text(detail_link)
+    if explicit:
+        if not provider_for_url(explicit):
+            raise ValueError("The supplied Unshackle detail link is not supported by MME.")
+        return explicit
+
+    identifier = clean_text(title_id)
+    if identifier.startswith(("https://", "http://")):
+        if not provider_for_url(identifier):
+            raise ValueError("Unshackle supplied a URL that is not supported by MME.")
+        return identifier
+    if not identifier or not re.fullmatch(r"[A-Za-z0-9_-]+", identifier):
+        raise ValueError("Unshackle did not supply one safe, usable provider title ID.")
+
+    provider = UNSHACKLE_SERVICE_ALIASES.get(unshackle_service_key(service), "")
+    encoded = urllib.parse.quote(identifier, safe="_-")
+    if provider == "amazon":
+        return f"https://www.primevideo.com/detail/{encoded}"
+    if provider == "bbc":
+        return bbc_iplayer.canonical_episode_url(identifier)
+    if provider == "crunchyroll":
+        return crunchyroll.canonical_episode_url(identifier, "")
+    if provider == "disneyplus":
+        return f"https://www.disneyplus.com/play/{encoded}"
+    if provider == "hbomax":
+        return f"https://play.hbomax.com/video/watch/{encoded}"
+    if provider == "netflix":
+        return f"https://www.netflix.com/title/{encoded}"
+    if provider == "paramountplus":
+        media_path = "shows" if clean_text(season) else "movies"
+        return f"https://www.paramountplus.com/{media_path}/video/{encoded}/"
+    supported = ", ".join(sorted(UNSHACKLE_SERVICE_ALIASES))
+    raise ValueError(f"Unshackle service '{clean_text(service)}' has no MME URL resolver. Supported aliases: {supported}")
+
+
+def unshackle_record_identifiers(record: dict[str, Any]) -> set[str]:
+    identifiers: set[str] = set()
+    for key in ("id", "episode_id", "video_id", "legacy_id", "compact_id", "gti", "asin"):
+        value = clean_text(record.get(key))
+        if value:
+            identifiers.add(value.casefold())
+    url = clean_text(record.get("url"))
+    if url:
+        identifiers.update(part.casefold() for part in urllib.parse.urlparse(url).path.split("/") if part)
+    return identifiers
+
+
+def unshackle_catalog_episode(meta: Metadata, title_id: str, season: str, episode: str) -> Metadata:
+    """Turn a public series catalog record into the one completed Unshackle episode."""
+    identifier = clean_text(title_id).casefold()
+    records = [record for record in meta.series_episodes if isinstance(record, dict)]
+    identity_matches = [record for record in records if identifier and identifier in unshackle_record_identifiers(record)]
+    matches = identity_matches
+    if not matches and clean_text(season).isdigit() and clean_text(episode).isdigit():
+        matches = [
+            record for record in records
+            if clean_text(record.get("season")) == str(int(season))
+            and clean_text(record.get("episode")) == str(int(episode))
+        ]
+    if len(matches) != 1:
+        raise ValueError("MME could not match Unshackle's completed file to one public episode record.")
+    record = matches[0]
+    if meta.source_site == crunchyroll.NAME:
+        episode_id = clean_text(record.get("id"))
+        if not episode_id:
+            raise ValueError("The matching Crunchyroll record did not expose an episode ID.")
+        episode_url = clean_text(record.get("url")) or crunchyroll.canonical_episode_url(episode_id, "")
+        return metadata_from_provider_dict(
+            crunchyroll.extract_episode_metadata(episode_id, episode_url, timeout=HTTP_TIMEOUT_SECONDS),
+            detail_link=episode_url,
+        )
+    builders = {
+        amazon.PRIME_NAME: amazon_prime_episode_metadata,
+        bbc_iplayer.NAME: bbc_queue_episode_metadata,
+        disneyplus.NAME: disneyplus_episode_metadata,
+        hbomax.NAME: hbomax_episode_metadata,
+        netflix.NAME: netflix_episode_metadata,
+        paramountplus.NAME: paramountplus_episode_metadata,
+        pbs_kids.NAME: pbs_kids_episode_metadata,
+    }
+    builder = builders.get(meta.source_site)
+    if not builder:
+        raise ValueError(f"{meta.source_site or 'This provider'} has no Unshackle episode catalog adapter.")
+    return builder(meta, record)
+
+
+def unshackle_parent_series_metadata(meta: Metadata) -> Metadata:
+    if meta.media_kind.casefold() == "series":
+        return meta
+    if meta.series_metadata:
+        return metadata_from_provider_dict(
+            meta.series_metadata,
+            detail_link=clean_text(meta.series_metadata.get("source_url")),
+        )
+    raise ValueError("The provider page did not expose the parent-series metadata required by Jellyfin.")
+
+
+def unshackle_metadata_dict(meta: Metadata) -> dict[str, Any]:
+    """Preserve a complete scraped series record when adapting a catalog result."""
+    return {
+        "source_url": meta.source_url,
+        "detail_link": meta.detail_link,
+        "source_site": meta.source_site,
+        "media_kind": meta.media_kind,
+        "title": meta.title,
+        "show_title": meta.show_title,
+        "original_title": meta.original_title,
+        "sort_title": meta.sort_title,
+        "plot": meta.plot,
+        "outline": meta.outline,
+        "tagline": meta.tagline,
+        "year": meta.year,
+        "series_start_year": meta.series_start_year,
+        "series_end_year": meta.series_end_year,
+        "series_is_current": meta.series_is_current,
+        "date": meta.date,
+        "runtime_minutes": meta.runtime_minutes,
+        "content_rating": meta.content_rating,
+        "numeric_rating": meta.numeric_rating,
+        "language": meta.language,
+        "poster_url": meta.poster_url,
+        "fanart_url": meta.fanart_url,
+        "logo_url": meta.logo_url,
+        "thumb_url": meta.thumb_url,
+        "trailer_url": meta.trailer_url,
+        "production_label": meta.production_label,
+        "genres": list(meta.genres),
+        "tags": list(meta.tags),
+        "studios": list(meta.studios),
+        "countries": list(meta.countries),
+        "directors": list(meta.directors),
+        "writers": list(meta.writers),
+        "credits": list(meta.credits),
+        "actors": [vars(actor) for actor in meta.actors],
+        "unique_ids": dict(meta.unique_ids),
+        "extra_fields": {label: list(values) for label, values in meta.extra_fields.items()},
+        "gallery_urls": list(meta.gallery_urls),
+        "extra_videos": [vars(item) for item in meta.extra_videos],
+    }
+
+
+def unshackle_series_root(media_file: Path, season: str) -> Path:
+    folder = media_file.parent
+    number = str(int(season)) if clean_text(season).isdigit() else ""
+    normalized = re.sub(r"[^a-z0-9]+", "", folder.name.casefold())
+    season_names = {f"season{number}", f"season{number.zfill(2)}", f"s{number}", f"s{number.zfill(2)}"} if number else set()
+    return folder.parent if normalized in season_names else folder
+
+
+def write_unshackle_nfo(meta: Metadata, target: Path, skip_existing: bool) -> list[Path]:
+    if skip_existing and target.exists():
+        return []
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(build_nfo(meta), encoding="utf-8")
+    return [target]
+
+
+def save_unshackle_thumb(meta: Metadata, media_file: Path) -> list[Path]:
+    if not clean_text(meta.thumb_url):
+        return []
+    extension = image_extension_from_url(meta.thumb_url) or ".jpg"
+    target = media_file.with_name(f"{media_file.stem}-thumb{extension}")
+    if target.exists():
+        return []
+    downloaded = download_binary(meta.thumb_url, target)
+    return [downloaded] if downloaded else []
+
+
+def save_unshackle_title_art(meta: Metadata, folder: Path, title_base: str) -> list[Path]:
+    """Save Jellyfin suffix artwork while keeping every asset anchored to Unshackle's title."""
+    saved: list[Path] = []
+    for artwork_type, url in (
+        ("poster", meta.poster_url),
+        ("backdrop", meta.fanart_url),
+        ("thumb", meta.thumb_url),
+        ("logo", meta.logo_url),
+    ):
+        if not clean_text(url):
+            continue
+        if meta.source_site == paramountplus.NAME:
+            extension = ".png"
+        elif artwork_type == "logo":
+            extension = ".png"
+        else:
+            extension = image_extension_from_url(url) or ".jpg"
+        target = folder / f"{title_base}-{artwork_type}{extension}"
+        if target.exists():
+            continue
+        downloaded = download_binary(url, target)
+        if not downloaded:
+            continue
+        normalized: Path | None = downloaded
+        if meta.source_site == paramountplus.NAME:
+            normalized = normalize_paramountplus_image_file(downloaded)
+        elif artwork_type == "logo":
+            normalized = normalize_provider_logo_file(downloaded)
+        if normalized:
+            saved.append(normalized)
+
+    if meta.gallery_urls:
+        gallery = folder / "extrafanart"
+        for index, url in enumerate(meta.gallery_urls, start=1):
+            if not clean_text(url):
+                continue
+            target = gallery / f"{title_base}-fanart-{index:02d}.jpg"
+            if target.exists():
+                continue
+            gallery.mkdir(parents=True, exist_ok=True)
+            downloaded = download_binary(url, target)
+            if downloaded:
+                saved.append(downloaded)
+    return saved
+
+
+def unshackle_public_trailer_url(meta: Metadata) -> tuple[str, bool]:
+    page_url = clean_text(meta.trailer_url)
+    if meta.source_site == crunchyroll.NAME and not page_url:
+        match = crunchyroll.find_official_youtube_trailer(meta.show_title or meta.title)
+        page_url = clean_text(match.get("url"))
+    if meta.source_site == hbomax.NAME and not page_url:
+        page_url = clean_text(meta.detail_link) or clean_text(meta.source_url)
+    if not page_url:
+        return "", False
+    if is_youtube_url(page_url):
+        return page_url, True
+    if meta.source_site == hbomax.NAME:
+        direct = page_url if is_hbomax_public_preview_url(page_url) else hbomax_capture_public_preview(page_url)
+        return direct, False
+    if meta.source_site == amazon.PRIME_NAME and not urllib.parse.urlparse(page_url).path.casefold().endswith((".mp4", ".m3u8", ".mpd")):
+        page_bytes = fetch_bytes(page_url)
+        direct = amazon_prime_direct_trailer_url_from_html(
+            page_bytes.decode("utf-8", errors="replace") if page_bytes else ""
+        )
+        return direct or amazon_prime_capture_trailer_url(page_url), False
+    return page_url, False
+
+
+def save_unshackle_trailer(meta: Metadata, folder: Path, title_base: str) -> list[Path]:
+    existing = [
+        path for path in folder.glob(f"{title_base}-trailer.*")
+        if path.is_file() and path.suffix.casefold() in VIDEO_EXTENSIONS
+    ]
+    if existing:
+        return []
+    trailer_url, youtube = unshackle_public_trailer_url(meta)
+    if not trailer_url:
+        return []
+    target = folder / f"{title_base}-trailer.mp4"
+    downloaded = download_youtube_trailer(trailer_url, target) if youtube else download_binary(trailer_url, target)
+    return [downloaded] if downloaded else []
+
+
+def save_unshackle_extra_videos(meta: Metadata, folder: Path, title_base: str) -> list[Path]:
+    saved: list[Path] = []
+    used: set[str] = set()
+    for index, extra in enumerate(meta.extra_videos, start=1):
+        page_url = clean_text(extra.url)
+        if not page_url or page_url == clean_text(meta.trailer_url):
+            continue
+        direct = page_url
+        if meta.source_site == hbomax.NAME and not is_hbomax_public_preview_url(page_url):
+            direct = hbomax_capture_public_preview(page_url)
+        if not direct:
+            continue
+        label = safe_filename(extra.title or f"Extra {index:02d}")
+        name = safe_filename(f"{title_base} - {label}")
+        candidate = name
+        duplicate = 2
+        while candidate.casefold() in used:
+            candidate = f"{name} ({duplicate})"
+            duplicate += 1
+        used.add(candidate.casefold())
+        extra_dir = folder / "Extras" / "Videos"
+        target = extra_dir / f"{candidate}{guess_media_extension(direct)}"
+        if target.exists():
+            continue
+        extra_dir.mkdir(parents=True, exist_ok=True)
+        downloaded = download_binary(direct, target)
+        if downloaded:
+            saved.append(downloaded)
+    return saved
+
+
+def save_unshackle_bundle(
+    meta: Metadata,
+    media_file: Path,
+    unshackle_title: str,
+    season: str,
+    skip_existing: bool,
+) -> list[Path]:
+    """Write a title-based Jellyfin bundle without renaming or moving downloaded files."""
+    saved: list[Path] = []
+    media_base = media_file.stem
+    if meta.media_kind.casefold() == "episode":
+        series = unshackle_parent_series_metadata(meta)
+        series_root = unshackle_series_root(media_file, season or meta.season_number)
+        title_base = safe_filename(unshackle_title or series.title or meta.show_title or meta.title)
+        saved.extend(write_unshackle_nfo(meta, media_file.with_suffix(".nfo"), skip_existing))
+        saved.extend(save_unshackle_thumb(meta, media_file))
+        saved.extend(write_unshackle_nfo(series, series_root / "tvshow.nfo", skip_existing=True))
+        saved.extend(save_unshackle_title_art(series, series_root, title_base))
+        saved.extend(save_unshackle_trailer(series, series_root, title_base))
+        saved.extend(save_unshackle_extra_videos(series, series_root, title_base))
+        return saved
+
+    title_base = media_base
+    saved.extend(write_unshackle_nfo(meta, media_file.with_suffix(".nfo"), skip_existing))
+    saved.extend(save_unshackle_thumb(meta, media_file))
+    saved.extend(save_unshackle_title_art(meta, media_file.parent, title_base))
+    saved.extend(save_unshackle_trailer(meta, media_file.parent, title_base))
+    saved.extend(save_unshackle_extra_videos(meta, media_file.parent, title_base))
+    return saved
+
+
+def run_unshackle_handoff(args: argparse.Namespace) -> int:
+    media_value = clean_text(args.media_folder)
+    if not media_value:
+        print("An exact completed video file is required for --media-folder when using --unshackle-handoff.")
+        return 1
+    media_file = Path(media_value).expanduser().resolve()
+    if not media_file.is_file() or media_file.suffix.casefold() not in VIDEO_EXTENSIONS:
+        print("--unshackle-handoff requires --media-folder to be the exact completed video file.")
+        return 1
+    try:
+        detail_link = unshackle_detail_link(
+            args.unshackle_service,
+            args.unshackle_id,
+            season=args.unshackle_season,
+            detail_link=args.detail_link,
+        )
+        with AnimatedStatus("Creating title-based Jellyfin metadata and extras"):
+            scraped = scrape_url(detail_link)
+            series_meta = scraped if scraped.media_kind.casefold() == "series" else None
+            meta = scraped
+            if scraped.media_kind.casefold() == "series" and clean_text(args.unshackle_episode):
+                meta = unshackle_catalog_episode(
+                    scraped,
+                    args.unshackle_id,
+                    args.unshackle_season,
+                    args.unshackle_episode,
+                )
+                if not meta.series_metadata and series_meta:
+                    meta.series_metadata = unshackle_metadata_dict(series_meta)
+            if meta.media_kind.casefold() == "episode":
+                meta.season_number = meta.season_number or clean_text(args.unshackle_season)
+                meta.episode_number = meta.episode_number or clean_text(args.unshackle_episode)
+                meta.episode_title = meta.episode_title or clean_text(args.unshackle_episode_title)
+                meta.show_title = meta.show_title or clean_text(args.unshackle_title) or meta.title
+            meta.year = meta.year or clean_text(args.unshackle_year)
+            if meta.series_metadata and not clean_text(meta.series_metadata.get("year")):
+                meta.series_metadata["year"] = clean_text(args.unshackle_year)
+            saved = save_unshackle_bundle(
+                meta,
+                media_file,
+                clean_text(args.unshackle_title),
+                clean_text(args.unshackle_season),
+                bool(args.skip_existing),
+            )
+    except UnsupportedProviderError as exc:
+        print(str(exc))
+        return 1
+    except Exception as exc:
+        print(f"Could not complete Unshackle metadata handoff: {exc}")
+        return 1
+    print(f"Saved {len(saved)} title-based item(s); media and subtitles were left unchanged.")
+    return 0
+
+
 def run_handoff(args: argparse.Namespace, settings: dict[str, Any]) -> int:
     detail_link = clean_text(args.detail_link)
     if not detail_link:
@@ -4989,15 +5390,26 @@ def run_handoff(args: argparse.Namespace, settings: dict[str, Any]) -> int:
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(add_help=True)
     parser.add_argument("--handoff", action="store_true")
+    parser.add_argument("--unshackle-handoff", action="store_true")
     parser.add_argument("--detail-link", default="")
     parser.add_argument("--media-folder", default="")
     parser.add_argument("--skip-existing", action="store_true")
+    parser.add_argument("--unshackle-service", default="")
+    parser.add_argument("--unshackle-id", default="")
+    parser.add_argument("--unshackle-title", default="")
+    parser.add_argument("--unshackle-year", default="")
+    parser.add_argument("--unshackle-season", default="")
+    parser.add_argument("--unshackle-episode", default="")
+    parser.add_argument("--unshackle-episode-title", default="")
+    parser.add_argument("--unshackle-sidecars", default="")
     return parser
 
 
 def main() -> int:
     args = build_parser().parse_args()
     settings = load_settings()
+    if args.unshackle_handoff:
+        return run_unshackle_handoff(args)
     if args.handoff:
         return run_handoff(args, settings)
 
