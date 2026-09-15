@@ -50,9 +50,9 @@ def state(current_slice: str, episodes: list[dict]):
             "releaseDateTime": "2025-01-01T00:00:00Z",
             "synopses": {"small": "Series short.", "large": "Series full description."},
             "images": {
-                "standard": "https://img.example/poster/{recipe}.jpg",
+                "standard": "https://img.example/episode-thumb/{recipe}.jpg",
                 "promotional": "https://img.example/backdrop/{recipe}.jpg",
-                "promotional_with_logo": "https://img.example/logo/{recipe}.png",
+                "promotional_with_logo": "https://img.example/title-card/{recipe}.jpg",
             },
             "masterBrand": {"titles": {"large": "BBC One"}},
         },
@@ -88,6 +88,14 @@ class BBCQueueModeTests(unittest.TestCase):
         self.assertEqual([(r["season"], r["episode"]) for r in item["series_episodes"]], [(1, 1), (1, 2), (2, 1)])
         self.assertIn("BBC iPlayer Provider", item["tags"])
         self.assertEqual(item["series_metadata"]["media_kind"], "series")
+        self.assertEqual(item["thumb_url"], "https://img.example/episode-thumb/1920x1080.jpg")
+        self.assertEqual(item["fanart_url"], "https://img.example/backdrop/1920x1080.jpg")
+        self.assertEqual(item["poster_url"], "")
+        self.assertEqual(item["logo_url"], "")
+        self.assertEqual(item["series_metadata"]["thumb_url"], "https://img.example/title-card/1920x1080.jpg")
+        self.assertEqual(item["series_metadata"]["fanart_url"], "https://img.example/backdrop/1920x1080.jpg")
+        self.assertEqual(item["series_metadata"]["poster_url"], "")
+        self.assertEqual(item["series_metadata"]["logo_url"], "")
 
     def test_independent_exact_file_handoffs_reuse_one_output_root(self):
         meta = base.metadata_from_provider_dict(self.extract())
@@ -114,6 +122,10 @@ class BBCQueueModeTests(unittest.TestCase):
                 base.save_bbc_queue_series_metadata(meta, {}, explicit_folder=str(second))
             show = root / "Example Show (2025-)"
             self.assertTrue((show / "S02" / "S02E01 Example Show - Return.mkv").exists())
+            self.assertTrue((show / "backdrop.jpg").exists())
+            self.assertTrue((show / "thumb.jpg").exists())
+            self.assertFalse((show / "poster.jpg").exists())
+            self.assertFalse((show / "logo.png").exists())
             self.assertEqual((show / "tvshow.nfo").read_text(encoding="utf-8"), "preserve me")
             self.assertTrue(unrelated.exists())
             self.assertFalse(first.exists()); self.assertFalse(second.exists())

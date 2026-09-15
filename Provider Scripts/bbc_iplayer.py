@@ -86,6 +86,10 @@ def extract_metadata(url: str, timeout: int = 25) -> dict[str, Any]:
         "episode_title": "",
         "date": "",
         "runtime_minutes": "",
+        "poster_url": "",
+        "fanart_url": clean_text(item.get("fanart_url")),
+        "logo_url": "",
+        "thumb_url": clean_text(item.get("bbc_title_card_url")) or clean_text(item.get("fanart_url")),
         "series_metadata": {},
     })
     item["series_metadata"] = series
@@ -106,13 +110,21 @@ def metadata_from_state(state: dict[str, Any], source_url: str) -> dict[str, Any
     season, episode_number = series_and_episode(subtitle)
     if not season:
         season, episode_number = related_series_placement(related, clean_text(episode.get("id")))
-    image_urls = dedupe(
-        image_url(images.get(key))
-        for key in ("standard", "promotional", "promotional_with_logo")
-        if isinstance(images.get(key), str)
+    episode_thumbnail = (
+        image_url(images.get("standard"))
+        if isinstance(images.get("standard"), str)
+        else ""
     )
-    poster = image_urls[0] if image_urls else ""
-    logo = image_urls[2] if len(image_urls) > 2 else ""
+    backdrop = (
+        image_url(images.get("promotional"))
+        if isinstance(images.get("promotional"), str)
+        else ""
+    )
+    title_card = (
+        image_url(images.get("promotional_with_logo"))
+        if isinstance(images.get("promotional_with_logo"), str)
+        else ""
+    )
     programme_id = clean_text(episode.get("tleoId"))
     episode_id = clean_text(episode.get("id"))
     duration = duration_minutes(
@@ -152,9 +164,13 @@ def metadata_from_state(state: dict[str, Any], source_url: str) -> dict[str, Any
         "date": iso_date(clean_text(episode.get("releaseDateTime"))),
         "runtime_minutes": duration,
         "language": "",  # The page language is UI language, not a verified subtitle language.
-        "poster_url": poster,
-        "fanart_url": image_urls[1] if len(image_urls) > 1 else poster,
-        "logo_url": logo,
+        # BBC exposes landscape composites here, not portrait posters or
+        # transparent logos. Preserve the roles the page actually supplies.
+        "poster_url": "",
+        "fanart_url": backdrop,
+        "logo_url": "",
+        "thumb_url": episode_thumbnail,
+        "bbc_title_card_url": title_card,
         "production_label": "Broadcaster",
         "genres": [nested(episode, "labels", "category")],
         "studios": [STUDIO_NAME],

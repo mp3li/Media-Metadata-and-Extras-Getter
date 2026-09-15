@@ -68,7 +68,7 @@ def show_record(complete: bool) -> dict:
         "brand": ["HBOTV"], "status": "published",
         "localizedRating": {"rating_authority": "us-fcc-tv", "classifier": "TV-MA", "descriptors": ["L", "S", "V"]},
         "credits": {"starring": "Zendaya", "directors": "Sam Levinson", "writers": "Sam Levinson", "producers": "Producer", "creators": "Sam Levinson", "sources": ""},
-        "images": {"cover-artwork": "https://img.example/poster.jpg", "default-wide": "https://img.example/backdrop.jpg", "centered-background": "https://img.example/fanart.jpg", "cover-artwork-horizontal": "https://img.example/thumb.jpg", "logo-centered": "https://img.example/logo.png"},
+        "images": {"poster-with-logo": "https://img.example/poster.jpg", "cover-artwork": "https://img.example/square.jpg", "default-wide": "https://img.example/banner.jpg", "centered-background": "https://img.example/unused.jpg", "cover-artwork-horizontal": "https://img.example/backdrop.jpg", "content-logo-polychromatic": "https://img.example/logo.png"},
         "trailer": {"programId": "PROM649125", "title": "Euphoria: Tease", "description": "Trailer description", "url": "/video/watch/PROM649125"},
         "seasons": seasons,
     }
@@ -83,7 +83,7 @@ def movie_record() -> dict:
         "genres": ["Comedy", "Drama"], "primaryGenre": "Comedy", "secondaryGenre": "Drama",
         "brand": ["HBOTV"], "localizedRating": {"rating_authority": "us-mpaa-film", "classifier": "R", "descriptors": []},
         "credits": {"starring": "Zendaya, Robert Pattinson", "directors": "Kristoffer Borgli", "writers": "Kristoffer Borgli", "producers": "Amy Greene", "creators": "", "sources": ""},
-        "images": {"cover-artwork": "https://img.example/movie-poster.jpg", "default-wide": "https://img.example/movie-backdrop.jpg", "centered-background": "https://img.example/movie-fanart.jpg", "cover-artwork-horizontal": "https://img.example/movie-thumb.jpg", "logo-centered": "https://img.example/movie-logo.png"},
+        "images": {"poster-with-logo": "https://img.example/movie-poster.jpg", "cover-artwork": "https://img.example/movie-square.jpg", "default-wide": "https://img.example/movie-banner.jpg", "centered-background": "https://img.example/movie-unused.jpg", "cover-artwork-horizontal": "https://img.example/movie-backdrop.jpg", "content-logo-polychromatic": "https://img.example/movie-logo.png"},
     }
 
 
@@ -108,8 +108,10 @@ class HBOMaxTests(unittest.TestCase):
         self.assertEqual(item["plot"], "Full movie description")
         self.assertEqual(item["poster_url"], "https://img.example/movie-poster.jpg")
         self.assertEqual(item["fanart_url"], "https://img.example/movie-backdrop.jpg")
-        self.assertEqual(item["thumb_url"], "https://img.example/movie-thumb.jpg")
+        self.assertEqual(item["thumb_url"], "")
+        self.assertEqual(item["banner_url"], "https://img.example/movie-banner.jpg")
         self.assertEqual(item["logo_url"], "https://img.example/movie-logo.png")
+        self.assertEqual(item["gallery_urls"], [])
         self.assertEqual(item["tags"], ["HBO Max", "Provider: HBO Max", "HBO Max Provider"])
 
     def test_show_enriches_complete_guide_and_keeps_trailer_metadata(self):
@@ -211,13 +213,17 @@ class HBOMaxTests(unittest.TestCase):
 
             episode_thumb = root / "S01" / "S01E01 Euphoria - Pilot-thumb.jpg"
             self.assertTrue(episode_thumb.exists())
-            self.assertTrue((root / "thumb.jpg").exists())
+            self.assertTrue((root / "backdrop.jpg").exists())
+            self.assertTrue((root / "banner.jpg").exists())
+            self.assertFalse((root / "thumb.jpg").exists())
+            self.assertFalse((root / "extrafanart").exists())
             self.assertFalse(any("poster" in path.name.casefold() for path in (root / "S01").iterdir()))
             self.assertEqual(
                 [(url, path) for url, path in downloaded if path.parent == root / "S01"],
                 [("https://img.example/episode-1-thumb.jpg", episode_thumb)],
             )
-            self.assertIn(("https://img.example/thumb.jpg", root / "thumb.jpg"), downloaded)
+            self.assertIn(("https://img.example/backdrop.jpg", root / "backdrop.jpg"), downloaded)
+            self.assertIn(("https://img.example/banner.jpg", root / "banner.jpg"), downloaded)
 
     def test_standalone_player_episode_refuses_to_guess_parent(self):
         player = f"https://play.hbomax.com/video/watch/{EPISODE_ID}"
@@ -234,8 +240,13 @@ class HBOMaxTests(unittest.TestCase):
             subtitle.write_text("subtitle", encoding="utf-8")
 
             def fake_download(_url: str, target: Path):
+                if not _url:
+                    return None
                 target.parent.mkdir(parents=True, exist_ok=True)
-                target.write_bytes(b"\x89PNG\r\n\x1a\nart" if target.suffix == ".png" else b"art")
+                target.write_bytes(
+                    b"\x89PNG\r\n\x1a\n" + b"\x00" * 17 + b"\x06" + b"\x00" * 10
+                    if target.suffix == ".png" else b"art"
+                )
                 return target
 
             workflow_order: list[str] = []
@@ -259,10 +270,23 @@ class HBOMaxTests(unittest.TestCase):
             self.assertTrue((root / "The Drama (2026).mkv").exists())
             self.assertTrue((root / "The Drama (2026).en.srt").exists())
             self.assertTrue((root / "The Drama (2026).nfo").exists())
-            for role in ("poster", "backdrop", "thumb", "logo"):
+            for role in ("poster", "backdrop", "banner", "logo"):
                 self.assertEqual(len(list(root.glob(f"The Drama (2026)-{role}.*"))), 1)
+            self.assertFalse(any(root.glob("The Drama (2026)-thumb.*")))
+            self.assertFalse((root / "extrafanart").exists())
             self.assertFalse(any(path.name.endswith("-poster.jpg") for path in root.rglob("S*/*")))
             self.assertEqual(workflow_order, ["trailer", "extras"])
+
+            with patch.object(base, "download_binary", side_effect=fake_download), patch.object(
+                base, "save_hbomax_trailer", return_value=[]
+            ), patch.object(base, "save_hbomax_extra_videos", return_value=[]):
+                base.save_metadata_bundle(
+                    meta,
+                    {},
+                    explicit_folder=str(root / "The Drama (2026).mkv"),
+                )
+            self.assertTrue((root / "The Drama (2026).mkv").exists())
+            self.assertFalse((root / "The Drama (2026)").exists())
 
     def test_clear_max_dash_trailer_uses_jellyfin_trailer_folder(self):
         meta = base.Metadata(
@@ -301,7 +325,7 @@ class HBOMaxTests(unittest.TestCase):
                 saved = base.save_hbomax_extra_videos(meta, Path(temp))
             self.assertEqual(saved, [Path(temp) / "Extras" / "Videos" / "Behind the Scenes.mp4"])
 
-    def test_non_png_max_logo_is_converted_instead_of_mislabeled(self):
+    def test_opaque_non_png_max_logo_is_rejected(self):
         with tempfile.TemporaryDirectory() as temp:
             logo = Path(temp) / "logo.png"
             logo.write_bytes(b"\xff\xd8\xffjpeg")
@@ -314,8 +338,15 @@ class HBOMaxTests(unittest.TestCase):
                 base.subprocess, "run", side_effect=fake_run
             ):
                 result = base.normalize_hbomax_logo_file(logo)
-            self.assertEqual(result, logo)
-            self.assertEqual(base.image_file_extension(result), ".png")
+            self.assertIsNone(result)
+            self.assertFalse(logo.exists())
+
+    def test_transparent_png_max_logo_is_retained(self):
+        with tempfile.TemporaryDirectory() as temp:
+            logo = Path(temp) / "logo.png"
+            logo.write_bytes(b"\x89PNG\r\n\x1a\n" + b"\x00" * 17 + b"\x06" + b"\x00" * 10)
+            self.assertEqual(base.normalize_hbomax_logo_file(logo), logo)
+            self.assertTrue(logo.exists())
 
 
 if __name__ == "__main__":

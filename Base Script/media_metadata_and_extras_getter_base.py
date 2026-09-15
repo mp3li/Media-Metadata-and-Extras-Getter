@@ -101,6 +101,7 @@ class Metadata:
     fanart_url: str = ""
     logo_url: str = ""
     thumb_url: str = ""
+    banner_url: str = ""
     trailer_url: str = ""
     production_label: str = "Production/Studio"
     genres: list[str] = field(default_factory=list)
@@ -372,6 +373,7 @@ def metadata_from_provider_dict(item: dict[str, Any], detail_link: str = "") -> 
     meta.fanart_url = clean_text(item.get("fanart_url"))
     meta.logo_url = clean_text(item.get("logo_url"))
     meta.thumb_url = clean_text(item.get("thumb_url"))
+    meta.banner_url = clean_text(item.get("banner_url"))
     meta.trailer_url = clean_text(item.get("trailer_url"))
     meta.production_label = clean_text(item.get("production_label")) or meta.production_label
     meta.folder_name_override = clean_text(item.get("folder_name_override"))
@@ -947,8 +949,11 @@ def organize_hbomax_movie(
     if not is_hbomax_movie(meta) or not match.video_path.exists():
         return match
     base = hbomax_movie_name(meta)
-    destination_parent = match.folder if explicit_folder else settings_output_dir(settings) / hbomax.NAME
-    destination = destination_parent / base
+    destination = (
+        match.folder
+        if explicit_folder and normalize_match_key(match.folder.name) == normalize_match_key(base)
+        else (match.folder if explicit_folder else settings_output_dir(settings) / hbomax.NAME) / base
+    )
     source_stem = match.video_path.stem
     related = [
         path for path in match.folder.iterdir()
@@ -1520,15 +1525,13 @@ def save_bbc_queue_series_bundle(meta: Metadata, show_folder: Path) -> list[Path
     nfo = show_folder / "tvshow.nfo"
     if not nfo.exists():
         nfo.write_text(build_nfo(series), encoding="utf-8"); saved.append(nfo)
-    for name, url in (("poster", series.poster_url), ("backdrop", series.fanart_url), ("logo", series.logo_url)):
+    for name, url in (("backdrop", series.fanart_url), ("thumb", series.thumb_url)):
         if not clean_text(url):
             continue
-        target = show_folder / f"{name}{image_extension_from_url(url) or ('.png' if name == 'logo' else '.jpg')}"
+        target = show_folder / f"{name}{image_extension_from_url(url) or '.jpg'}"
         if not target.exists():
             path = download_binary(url, target)
             if path:
-                if name == "logo" and isinstance(path, Path):
-                    path = normalize_provider_logo_file(path)
                 saved.append(path)
     return saved
 
@@ -2685,7 +2688,8 @@ def hbomax_episode_metadata(meta: Metadata, record: dict[str, Any]) -> Metadata:
 def save_hbomax_show_art(meta: Metadata, folder: Path, base_name: str = "") -> list[Path]:
     saved: list[Path] = []
     for artwork_type, url in (
-        ("poster", meta.poster_url), ("backdrop", meta.fanart_url), ("thumb", meta.thumb_url), ("logo", meta.logo_url),
+        ("poster", meta.poster_url), ("backdrop", meta.fanart_url),
+        ("banner", meta.banner_url), ("logo", meta.logo_url),
     ):
         if not clean_text(url):
             continue
@@ -2697,13 +2701,6 @@ def save_hbomax_show_art(meta: Metadata, folder: Path, base_name: str = "") -> l
             if path:
                 if artwork_type == "logo":
                     path = normalize_hbomax_logo_file(path)
-                saved.append(path)
-    if meta.gallery_urls:
-        gallery = folder / "extrafanart"
-        for index, url in enumerate(meta.gallery_urls, start=1):
-            if clean_text(url):
-                gallery.mkdir(parents=True, exist_ok=True)
-                path = download_binary(url, gallery / f"fanart-{index:02d}.jpg")
                 if path:
                     saved.append(path)
     return saved
@@ -2794,8 +2791,25 @@ def normalize_paramountplus_image_file(path: Path) -> Path | None:
     return None
 
 
-def normalize_hbomax_logo_file(path: Path) -> Path:
-    return normalize_provider_logo_file(path)
+def png_has_transparency(path: Path) -> bool:
+    """Return whether a PNG carries an alpha channel or transparency chunk."""
+    try:
+        data = path.read_bytes()
+    except OSError:
+        return False
+    return (
+        data.startswith(b"\x89PNG\r\n\x1a\n")
+        and len(data) > 25
+        and (data[25] in {4, 6} or b"tRNS" in data)
+    )
+
+
+def normalize_hbomax_logo_file(path: Path) -> Path | None:
+    normalized = normalize_provider_logo_file(path)
+    if normalized.suffix.casefold() == ".png" and png_has_transparency(normalized):
+        return normalized
+    normalized.unlink(missing_ok=True)
+    return None
 
 
 def ensure_hbomax_series_bundle(meta: Metadata, show_folder: Path) -> list[Path]:
@@ -4547,6 +4561,7 @@ def save_metadata_bundle_to_location(
     hbomax_movie_art = meta.source_site == hbomax.NAME and meta.media_kind.casefold() == "movie"
     paramountplus_movie_art = is_paramountplus_movie(meta)
     netflix_movie_art = is_netflix_movie(meta)
+    bbc_iplayer_art = meta.source_site == bbc_iplayer.NAME
     if disneyplus_movie_art:
         saved.extend(save_disneyplus_show_art(meta, folder, base_name=base_name))
     if hbomax_movie_art:
@@ -4562,6 +4577,12 @@ def save_metadata_bundle_to_location(
                 path = download_binary(url, target)
                 if path:
                     saved.append(path)
+    if bbc_iplayer_art and clean_text(meta.fanart_url):
+        target = folder / f"{base_name}-backdrop{image_extension_from_url(meta.fanart_url) or '.jpg'}"
+        if not target.exists():
+            path = download_binary(meta.fanart_url, target)
+            if path:
+                saved.append(path)
     if meta.source_site == crunchyroll.NAME or (
         meta.source_site in {disneyplus.NAME, hbomax.NAME, paramountplus.NAME, pbs_kids.NAME, amazon.PRIME_NAME}
         and meta.media_kind.casefold() in {"series", "episode"}
@@ -4585,7 +4606,7 @@ def save_metadata_bundle_to_location(
         else:
             saved.extend(save_paramountplus_show_art(meta, show_folder))
         return saved
-    if hbomax_movie_art or paramountplus_movie_art or netflix_movie_art:
+    if hbomax_movie_art or paramountplus_movie_art or netflix_movie_art or bbc_iplayer_art:
         return saved
     artwork_base = safe_filename(artwork_base_name) if artwork_base_name else base_name
     is_tvshow_bundle = meta.media_kind.casefold() == "series" and base_name == "tvshow" and not artwork_base_name
