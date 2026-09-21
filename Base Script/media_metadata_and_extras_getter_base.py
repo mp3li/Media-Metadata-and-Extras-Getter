@@ -1756,6 +1756,15 @@ def netflix_show_folder(folder: Path, meta: Metadata) -> Path:
     return root / desired
 
 
+def netflix_explicit_show_folder(explicit_folder: str, meta: Metadata) -> Path | None:
+    return provider_handoff_show_folder(
+        explicit_folder,
+        meta,
+        netflix_series_folder_name(meta),
+        {"Netflix"},
+    )
+
+
 def netflix_media_groups(
     meta: Metadata, settings: dict[str, Any], explicit_folder: str = ""
 ) -> list[tuple[NetflixMediaGroup, dict[str, Any]]]:
@@ -1778,6 +1787,16 @@ def netflix_media_groups(
                     if Path(filename).suffix.casefold() in VIDEO_EXTENSIONS
                 )
     wanted = normalize_match_key(meta.show_title or meta.title)
+    exact_file = Path(explicit_folder).expanduser().resolve() if explicit_folder else None
+    direct_position = None
+    if (
+        exact_file is not None
+        and exact_file.is_file()
+        and meta.media_kind.casefold() == "episode"
+        and meta.season_number.isdigit()
+        and meta.episode_number.isdigit()
+    ):
+        direct_position = (int(meta.season_number), int(meta.episode_number))
     matched: list[tuple[NetflixMediaGroup, dict[str, Any]]] = []
     claimed: set[tuple[int, int]] = set()
     for video in sorted(set(candidates)):
@@ -1793,6 +1812,8 @@ def netflix_media_groups(
         ]
         if len(identity) == 1:
             position = (int(identity[0]["season"]), int(identity[0]["episode"]))
+        elif exact_file is not None and video == exact_file and direct_position:
+            position = direct_position
         else:
             position = paramountplus_episode_position(f"{video.stem} {video.parent.name}")
         record = guide.get(position) if position else None
@@ -1819,7 +1840,7 @@ def netflix_episode_metadata(meta: Metadata, record: dict[str, Any]) -> Metadata
     return Metadata(
         source_url=clean_text(record.get("url")) or meta.source_url,
         detail_link=clean_text(record.get("url")), source_site=netflix.NAME,
-        media_kind="episode", title=meta.title, show_title=meta.title,
+        media_kind="episode", title=meta.title, show_title=meta.show_title or meta.title,
         season_number=clean_text(record.get("season")), episode_number=clean_text(record.get("episode")),
         episode_title=clean_text(record.get("title")), outline=clean_text(record.get("description")),
         plot=clean_text(record.get("description")), date=clean_text(record.get("date")),
@@ -1828,8 +1849,47 @@ def netflix_episode_metadata(meta: Metadata, record: dict[str, Any]) -> Metadata
         series_is_current=meta.series_is_current, content_rating=meta.content_rating,
         thumb_url=clean_text(record.get("image")), genres=list(meta.genres), tags=list(meta.tags),
         studios=list(meta.studios), actors=list(meta.actors),
-        unique_ids={"netflix": identifier} if identifier else {},
+        directors=list(meta.directors), writers=list(meta.writers), credits=list(meta.credits),
+        unique_ids={"netflix": identifier} if identifier else {}, series_metadata=meta.series_metadata,
     )
+
+
+def netflix_parent_series_meta(meta: Metadata) -> Metadata:
+    if meta.series_metadata:
+        return metadata_from_provider_dict(
+            meta.series_metadata,
+            detail_link=clean_text(meta.series_metadata.get("source_url")),
+        )
+    return meta
+
+
+def netflix_catalog_is_complete(meta: Metadata) -> bool:
+    values = meta.extra_fields.get("Netflix catalog status", [])
+    return any(clean_text(value).casefold() == "complete" for value in values)
+
+
+def save_netflix_extra_videos(meta: Metadata, folder: Path) -> list[Path]:
+    saved: list[Path] = []
+    used_names: set[str] = set()
+    for index, video in enumerate(meta.extra_videos, start=1):
+        url = clean_text(video.url)
+        if not url or url == clean_text(meta.trailer_url):
+            continue
+        base = safe_filename(video.title or f"extra-{index:02d}")
+        candidate = base
+        duplicate = 2
+        while candidate.casefold() in used_names:
+            candidate = f"{base} ({duplicate})"
+            duplicate += 1
+        used_names.add(candidate.casefold())
+        target = folder / "Extras" / "Videos" / f"{candidate}{guess_media_extension(url)}"
+        if target.exists():
+            continue
+        target.parent.mkdir(parents=True, exist_ok=True)
+        path = download_binary(url, target)
+        if path:
+            saved.append(path)
+    return saved
 
 
 def save_netflix_series_metadata(
@@ -1838,22 +1898,36 @@ def save_netflix_series_metadata(
     explicit_folder: str = "",
     skip_existing: bool = False,
 ) -> list[Path] | None:
-    if meta.source_site != netflix.NAME or meta.media_kind.casefold() != "series":
+    if meta.source_site != netflix.NAME or meta.media_kind.casefold() not in {"series", "episode"}:
         return None
-    if not meta.series_episodes:
+    series = netflix_parent_series_meta(meta)
+    catalog = meta.series_episodes or series.series_episodes
+    if not catalog:
         print("Netflix Queue Mode skipped: the public title page did not expose an identifiable episode catalog.")
+        return []
+    meta.series_episodes = list(catalog)
+    if not explicit_folder and not netflix_catalog_is_complete(series):
+        print("Netflix Queue Mode skipped: the public title page exposed only a partial episode catalog.")
         return []
     matches = netflix_media_groups(meta, settings, explicit_folder)
     if not matches:
         return []
     saved: list[Path] = []
     bundled: set[Path] = set()
+    explicit_show_folder = netflix_explicit_show_folder(explicit_folder, series)
     for group, record in matches:
-        episode_meta = netflix_episode_metadata(meta, record)
-        show_folder = netflix_show_folder(group.folder, meta)
+        if (
+            meta.media_kind.casefold() == "episode"
+            and meta.season_number == str(group.season)
+            and meta.episode_number == str(group.episode)
+        ):
+            episode_meta = meta
+        else:
+            episode_meta = netflix_episode_metadata(series, record)
+        show_folder = explicit_show_folder or netflix_show_folder(group.folder, series)
         destination = show_folder / f"S{group.season:02d}"
         base = safe_filename(
-            f"S{group.season:02d}E{group.episode:02d} {meta.title}"
+            f"S{group.season:02d}E{group.episode:02d} {series.title}"
             + (f" - {episode_meta.episode_title}" if episode_meta.episode_title else "")
         )
         targets = [(source, destination / (base + source.name[len(group.stem):])) for source in group.files]
@@ -1873,10 +1947,15 @@ def save_netflix_series_metadata(
             canonical.mkdir(parents=True, exist_ok=True)
             nfo = canonical / "tvshow.nfo"
             if not nfo.exists():
-                nfo.write_text(build_nfo(meta), encoding="utf-8"); saved.append(nfo)
-            for name, url in (("poster", meta.poster_url), ("backdrop", meta.fanart_url)):
+                nfo.write_text(build_nfo(series), encoding="utf-8"); saved.append(nfo)
+            for name, url in (
+                ("poster", series.poster_url),
+                ("backdrop", series.fanart_url),
+                ("logo", series.logo_url),
+            ):
                 if clean_text(url):
-                    target = canonical / f"{name}{image_extension_from_url(url) or '.jpg'}"
+                    fallback = ".png" if name == "logo" else ".jpg"
+                    target = canonical / f"{name}{image_extension_from_url(url) or fallback}"
                     if not target.exists():
                         path = download_binary(url, target)
                         if path:
@@ -1893,12 +1972,14 @@ def save_netflix_series_metadata(
             if path:
                 saved.append(path)
     for canonical in bundled:
-        if not meta.trailer_url:
-            continue
-        trailer_dir = canonical / "trailers"; trailer_dir.mkdir(parents=True, exist_ok=True)
-        trailer = download_binary(meta.trailer_url, trailer_dir / "trailer.mp4")
-        if trailer:
-            saved.append(trailer)
+        if series.trailer_url:
+            trailer_dir = canonical / "trailers"; trailer_dir.mkdir(parents=True, exist_ok=True)
+            trailer_target = trailer_dir / "trailer.mp4"
+            if not trailer_target.exists():
+                trailer = download_binary(series.trailer_url, trailer_target)
+                if trailer:
+                    saved.append(trailer)
+        saved.extend(save_netflix_extra_videos(series, canonical))
     print(f"Netflix Queue Mode found {len(matches)} local episode(s) and saved {len(saved)} item(s).")
     return saved
 
@@ -4783,9 +4864,13 @@ def save_metadata_bundle(meta: Metadata, settings: dict[str, Any], explicit_fold
     if is_netflix_movie(meta) and meta.trailer_url:
         trailer_dir = folder / "trailers"
         trailer_dir.mkdir(parents=True, exist_ok=True)
-        trailer = download_binary(meta.trailer_url, trailer_dir / "trailer.mp4")
-        if trailer:
-            saved.append(trailer)
+        trailer_target = trailer_dir / "trailer.mp4"
+        if not trailer_target.exists():
+            trailer = download_binary(meta.trailer_url, trailer_target)
+            if trailer:
+                saved.append(trailer)
+    if is_netflix_movie(meta):
+        saved.extend(save_netflix_extra_videos(meta, folder))
     return saved
 
 
@@ -4828,10 +4913,15 @@ def save_metadata_bundle_to_location(
     if paramountplus_movie_art:
         saved.extend(save_paramountplus_movie_art(meta, folder, base_name))
     if netflix_movie_art:
-        for artwork_type, url in (("poster", meta.poster_url), ("backdrop", meta.fanart_url)):
+        for artwork_type, url in (
+            ("poster", meta.poster_url),
+            ("backdrop", meta.fanart_url),
+            ("logo", meta.logo_url),
+        ):
             if not clean_text(url):
                 continue
-            target = folder / f"{base_name}-{artwork_type}{image_extension_from_url(url) or '.jpg'}"
+            fallback = ".png" if artwork_type == "logo" else ".jpg"
+            target = folder / f"{base_name}-{artwork_type}{image_extension_from_url(url) or fallback}"
             if not target.exists():
                 path = download_binary(url, target)
                 if path:

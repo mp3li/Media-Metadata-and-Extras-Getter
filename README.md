@@ -90,7 +90,7 @@ This tool can also serve as the metadata stage of [MediaFab](https://github.com/
 The current provider scripts support these public detail-page links:
 
 - Amazon Prime Video detail pages on `primevideo.com`, plus the existing Amazon video detail-page forms on `amazon.com`
-- Netflix title pages
+- Netflix title and episode `/watch/...` pages
 - Disney+ browse entity and episode `/play/...` pages
 - HBO Max movie, show, and public show-episode catalog pages; `play.hbomax.com` movie/show links are normalized to their public catalog pages
 - BBC iPlayer episode pages, including episodes in a series and one-off programmes such as films or plays
@@ -126,7 +126,7 @@ The stable handoff interface is:
 --handoff --detail-link <provider-page> --media-folder <exact-completed-file> --skip-existing
 ```
 
-The identity MediaFab should preserve is provider-specific: Crunchyroll watch ID, Disney+ play UUID, Max episode UUID, Paramount+ episode ID, Prime Video compact ID/GTI/ASIN, PBS KIDS video or legacy media ID, BBC programme PID, or Netflix title/episode ID. Netflix series Queue Mode deliberately skips organization when its public title data does not expose a complete identifiable episode catalog.
+The identity MediaFab should preserve is provider-specific: Crunchyroll watch ID, Disney+ play UUID, Max episode UUID, Paramount+ episode ID, Prime Video compact ID/GTI/ASIN, PBS KIDS video or legacy media ID, BBC programme PID, or Netflix title/episode ID. A Netflix episode `/watch/...` link resolves its parent show and exact public season/episode record for the per-download handoff. A series-wide manual scan still deliberately skips organization when Netflix exposes only a partial catalog.
 
 ## Provider Coverage
 
@@ -145,13 +145,14 @@ Coverage depends on what the provider exposes in the public page data for each i
 
 ### Netflix
 
-- title, plot, year, runtime, content rating, genres, tags, cast, and starring information when exposed
-- Netflix title identifier
-- poster and wide artwork
-- a direct trailer only when a usable direct media URL is exposed
-- the exact `Netflix Provider` tag on every Netflix NFO
+- movie, series, and exact episode `/watch/...` links, with public parent-show resolution for episode handoffs
+- title, short/full description, release year or series year range, exact runtime when exposed, content rating, genres, descriptive tags, cast, creators, directors, audio languages, subtitle languages, season count, Netflix IDs, and public catalog-completeness status
+- Netflix's true portrait `BOXSHOT` as Jellyfin `poster` when the selected title exposes one, its separate wide `BILLBOARD` as `backdrop`, transparent horizontal title artwork as `logo`, and the selected episode's `MERCH_STILL` as its one `-thumb`; a missing portrait source is omitted rather than manufactured from the backdrop
+- provider-labelled public trailers under Jellyfin's native `trailers/trailer.mp4`, with other clear public teasers, promos, and behind-the-scenes videos under `Extras/Videos/`; optional video failure does not fail metadata or organization
+- the exact `Netflix Provider` tag on every Netflix movie, series, and episode NFO
 - movie handoffs remain beneath the supplied MediaFab destination in `Movie Title (Year)/`, with matching local media and subtitles renamed only after collision validation
-- series Queue Mode is available only when the public title data exposes episode IDs with exact season/episode placement; those IDs outrank stale filename placement, each supplied file is immediately added to the reusable year-qualified series root, and an incomplete or absent public guide is skipped without guessing
+- every exact episode handoff immediately renames and organizes only its supplied media and sidecars into the reusable `Series Title (Year Range)/Sxx/` root, creates the parent series bundle on the first episode, and reuses an existing title-matched root for later downloads instead of nesting or duplicating it
+- Netflix IDs outrank stale filename placement; the exact episode link supplies the direct position for an otherwise anonymous completed filename, while series-wide manual scans require a complete public guide and fail closed instead of guessing by duration, queue order, or timestamp
 
 ### Disney+
 
@@ -643,9 +644,11 @@ The values come from the selected Prime Video detail page and can change; the ta
 
 ## Netflix Queue Mode
 
-Netflix movie handoffs use the supplied MediaFab destination and create `Movie Title (Year)/` there, moving only the matched video and its directly linked subtitle sidecars after collision checks. Available provider poster/backdrop artwork and a direct public trailer are saved in their Jellyfin roles; trailer work runs after the metadata and organization workflow.
+Netflix movie handoffs use the supplied MediaFab destination and create `Movie Title (Year)/` there, moving only the matched video and its directly linked subtitle sidecars after collision checks. Available source-faithful poster, backdrop, transparent logo, direct public trailer, and extra videos are saved in their Jellyfin roles; optional video work runs after metadata and organization.
 
-Netflix series Queue Mode is intentionally stricter because public Netflix title pages do not consistently expose a complete episode guide. It runs only when the page data supplies an exact Netflix episode ID together with season and episode placement. When that catalog exists, each exact completed file is matched by ID before any stale `SxxExx` text, immediately added to the reusable year-qualified series root, and given its episode NFO and thumbnail. When the public catalog is missing or incomplete, the provider reports that Queue Mode was skipped and leaves the supplied media untouched instead of guessing by duration, queue order, or timestamp filename.
+For MediaFab individual mode and Queue Mode, pass the current Netflix `/watch/<episode-id>` link with that one exact completed file. MME follows Netflix's public canonical relationship to the parent show, locates that episode ID in the public season graph, and uses the proven season/episode placement even when the downloader filename is anonymous. That invocation immediately adds the media and its subtitle sidecars to the reusable year-qualified series root, writes the episode NFO and one matching thumbnail, and ensures the root `tvshow.nfo`, available series artwork, trailer, and extras exist. It never waits for the queue to finish.
+
+Public Netflix title pages do not consistently expose every episode at once. That does not block a per-item `/watch/...` handoff when the requested episode itself is present and identified, but a series-wide manual directory scan requires a complete advertised catalog. Missing requested identity or a partial series-wide guide fails closed and leaves media untouched instead of guessing by runtime, duration, queue order, or timestamp filename.
 
 ## BBC Series Mode
 
