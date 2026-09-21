@@ -865,6 +865,100 @@ def local_episode_sidecars(video: Path) -> list[Path]:
     return sorted(output)
 
 
+def media_stream_digest(path: Path) -> str:
+    """Hash decoded-container-independent video/audio packets for collision proof."""
+    executable = shutil.which("ffmpeg")
+    if not executable or not path.is_file():
+        return ""
+    command = [
+        executable,
+        "-v", "error",
+        "-i", str(path),
+        "-map", "0:v?",
+        "-map", "0:a?",
+        "-c", "copy",
+        "-f", "hash",
+        "-hash", "sha256",
+        "-",
+    ]
+    try:
+        result = subprocess.run(
+            command,
+            capture_output=True,
+            check=False,
+            text=True,
+            timeout=1800,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return ""
+    if result.returncode != 0:
+        return ""
+    match = re.search(r"SHA256=([a-f0-9]{64})", result.stdout, re.IGNORECASE)
+    return match.group(1).casefold() if match else ""
+
+
+def exact_media_streams_match(source: Path, target: Path) -> bool:
+    """Return true only when both files contain byte-identical video/audio streams."""
+    source_digest = media_stream_digest(source)
+    return bool(source_digest and source_digest == media_stream_digest(target))
+
+
+def resolve_or_validate_media_targets(
+    targets: list[tuple[Path, Path]],
+    group_files: list[Path],
+    provider_name: str,
+    skip_existing: bool = False,
+) -> bool:
+    """Validate rename targets, or consume one proven-identical handoff duplicate.
+
+    A verified duplicate is accepted only for an explicit ``--skip-existing``
+    workflow. The already-organized media remains untouched. The newly supplied
+    video is removed, existing sidecars are preserved, and missing sidecars from
+    the new handoff are moved beside the existing media.
+    """
+    used: set[Path] = set()
+    source_paths = {path.resolve() for path in group_files}
+    collisions: list[tuple[Path, Path]] = []
+    for source, target in targets:
+        resolved_target = target.resolve()
+        if resolved_target in used:
+            raise FileExistsError(f"{provider_name} rename target already exists: {target}")
+        used.add(resolved_target)
+        if target.exists() and resolved_target not in source_paths:
+            collisions.append((source, target))
+    if not collisions:
+        return False
+
+    video_pairs = [
+        (source, target)
+        for source, target in targets
+        if source.suffix.casefold() in VIDEO_EXTENSIONS
+        and target.exists()
+        and target.resolve() not in source_paths
+    ]
+    if not (
+        skip_existing
+        and video_pairs
+        and all(exact_media_streams_match(source, target) for source, target in video_pairs)
+    ):
+        raise FileExistsError(f"{provider_name} rename target already exists: {collisions[0][1]}")
+
+    for source, target in targets:
+        if source.resolve() == target.resolve():
+            continue
+        if target.exists():
+            source.unlink()
+        else:
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.move(str(source), str(target))
+    preserved = video_pairs[0][1]
+    print(
+        f"{provider_name} handoff verified identical media already exists; "
+        f"preserved {preserved} and removed the incoming duplicate."
+    )
+    return True
+
+
 def default_folder_name(meta: Metadata) -> str:
     if is_netflix_movie(meta):
         return netflix_movie_name(meta)
@@ -895,7 +989,7 @@ def netflix_movie_name(meta: Metadata) -> str:
 
 
 def organize_netflix_movie(
-    match: MediaMatch, meta: Metadata, explicit_folder: str = ""
+    match: MediaMatch, meta: Metadata, explicit_folder: str = "", skip_existing: bool = False
 ) -> MediaMatch:
     if not is_netflix_movie(meta) or not match.video_path.exists():
         return match
@@ -910,10 +1004,14 @@ def organize_netflix_movie(
         and (path.stem == source_stem or path.name.startswith(source_stem + "."))
     ]
     targets = [destination / (base + path.name[len(source_stem):]) for path in related]
-    if any(target.exists() and target not in related for target in targets):
-        raise FileExistsError(f"Netflix movie destination already exists: {destination}")
+    paired_targets = list(zip(related, targets))
+    if resolve_or_validate_media_targets(
+        paired_targets, related, "Netflix", skip_existing=skip_existing
+    ):
+        video = next((target for target in targets if target.suffix.casefold() in VIDEO_EXTENSIONS), match.video_path)
+        return MediaMatch(destination, video, base, match.score)
     destination.mkdir(parents=True, exist_ok=True)
-    for source, target in zip(related, targets):
+    for source, target in paired_targets:
         if source != target:
             shutil.move(str(source), str(target))
     video = next((target for target in targets if target.suffix.casefold() in VIDEO_EXTENSIONS), None)
@@ -944,7 +1042,8 @@ def hbomax_movie_name(meta: Metadata) -> str:
 
 
 def organize_hbomax_movie(
-    match: MediaMatch, meta: Metadata, settings: dict[str, Any], explicit_folder: str = ""
+    match: MediaMatch, meta: Metadata, settings: dict[str, Any], explicit_folder: str = "",
+    skip_existing: bool = False,
 ) -> MediaMatch:
     if not is_hbomax_movie(meta) or not match.video_path.exists():
         return match
@@ -962,10 +1061,17 @@ def organize_hbomax_movie(
         and (path.stem == source_stem or path.name.startswith(source_stem + "."))
     ]
     targets = [destination / (base + path.name[len(source_stem):]) for path in related]
-    if any(target.exists() and target not in related for target in targets):
-        raise FileExistsError(f"HBO Max movie destination already exists: {destination}")
+    paired_targets = list(zip(related, targets))
+    if resolve_or_validate_media_targets(
+        paired_targets, related, "HBO Max", skip_existing=skip_existing
+    ):
+        video_target = next(
+            (target for target in targets if target.suffix.casefold() in VIDEO_EXTENSIONS),
+            destination / (base + match.video_path.suffix),
+        )
+        return MediaMatch(destination, video_target, base, match.score)
     destination.mkdir(parents=True, exist_ok=True)
-    for source, target in zip(related, targets):
+    for source, target in paired_targets:
         if source != target:
             shutil.move(str(source), str(target))
     video_target = destination / (base + match.video_path.suffix)
@@ -977,6 +1083,7 @@ def organize_disneyplus_movie(
     meta: Metadata,
     settings: dict[str, Any],
     explicit_folder: str = "",
+    skip_existing: bool = False,
 ) -> MediaMatch:
     if not is_disneyplus_movie(meta) or not match.video_path.exists():
         return match
@@ -991,10 +1098,17 @@ def organize_disneyplus_movie(
         and (path.stem == source_stem or path.name.startswith(source_stem + "."))
     ]
     targets = [destination / (base + path.name[len(source_stem):]) for path in related_files]
-    if any(target.exists() and target not in related_files for target in targets):
-        raise FileExistsError(f"Disney+ movie destination already exists: {destination}")
+    paired_targets = list(zip(related_files, targets))
+    if resolve_or_validate_media_targets(
+        paired_targets, related_files, "Disney+", skip_existing=skip_existing
+    ):
+        video_target = next(
+            (target for target in targets if target.suffix.casefold() in VIDEO_EXTENSIONS),
+            destination / (base + match.video_path.suffix),
+        )
+        return MediaMatch(destination, video_target, base, match.score)
     destination.mkdir(parents=True, exist_ok=True)
-    for source, target in zip(related_files, targets):
+    for source, target in paired_targets:
         if source != target:
             shutil.move(str(source), str(target))
     video_target = destination / (base + match.video_path.suffix)
@@ -1002,7 +1116,8 @@ def organize_disneyplus_movie(
 
 
 def organize_paramountplus_movie(
-    match: MediaMatch, meta: Metadata, settings: dict[str, Any], explicit_folder: str = ""
+    match: MediaMatch, meta: Metadata, settings: dict[str, Any], explicit_folder: str = "",
+    skip_existing: bool = False,
 ) -> MediaMatch:
     """Move a matched Paramount+ movie and its matching subtitle sidecars into its requested library folder."""
     if not is_paramountplus_movie(meta) or not match.video_path.exists():
@@ -1024,10 +1139,17 @@ def organize_paramountplus_movie(
         destination / (base + path.name[len(source_stem):])
         for path in related_files
     ]
-    if any(target.exists() and target not in related_files for target in targets):
-        raise FileExistsError(f"Paramount+ movie destination already exists: {destination}")
+    paired_targets = list(zip(related_files, targets))
+    if resolve_or_validate_media_targets(
+        paired_targets, related_files, "Paramount+", skip_existing=skip_existing
+    ):
+        video_target = next(
+            (target for target in targets if target.suffix.casefold() in VIDEO_EXTENSIONS),
+            destination / (base + match.video_path.suffix),
+        )
+        return MediaMatch(destination, video_target, base, match.score)
     destination.mkdir(parents=True, exist_ok=True)
-    for source, target in zip(related_files, targets):
+    for source, target in paired_targets:
         if source != target:
             shutil.move(str(source), str(target))
     video_target = destination / (base + match.video_path.suffix)
@@ -1253,7 +1375,12 @@ def bbc_subtitle_language(path: Path) -> str:
     return {"eng": "en", "english": "en", "wel": "cy", "welsh": "cy", "gla": "gd"}.get(match.group(1).casefold(), match.group(1).casefold())
 
 
-def prepare_bbc_media_group(meta: Metadata, group: BBCMediaGroup, settings: dict[str, Any]) -> BBCMediaGroup:
+def prepare_bbc_media_group(
+    meta: Metadata,
+    group: BBCMediaGroup,
+    settings: dict[str, Any],
+    skip_existing: bool = False,
+) -> BBCMediaGroup:
     rename = bool(settings.get("bbc_series_rename_enabled"))
     organize = bool(settings.get("bbc_series_organize_enabled"))
     if not (rename or organize):
@@ -1268,10 +1395,23 @@ def prepare_bbc_media_group(meta: Metadata, group: BBCMediaGroup, settings: dict
         if suffix.casefold() in {".srt", ".vtt", ".ass", ".ssa", ".sub"} and rename:
             target_name = f"{base}.{bbc_subtitle_language(path)}{suffix}"
         target = destination / target_name
-        if target in used or (target.exists() and target not in group.files):
+        if target in used:
             raise FileExistsError(f"BBC rename target already exists: {target}")
         used.add(target)
         targets.append((path, target))
+    if resolve_or_validate_media_targets(
+        targets, group.files, "BBC", skip_existing=skip_existing
+    ):
+        video_files = [target for _source, target in targets if target.suffix.casefold() in VIDEO_EXTENSIONS]
+        return BBCMediaGroup(
+            folder=destination,
+            stem=(video_files[0].stem if video_files else base),
+            season=group.season,
+            episode=group.episode,
+            episode_id=group.episode_id,
+            episode_name=group.episode_name,
+            files=[target for _source, target in targets],
+        )
     destination.mkdir(parents=True, exist_ok=True)
     temporary: list[tuple[Path, Path]] = []
     for index, (source, target) in enumerate(targets, start=1):
@@ -1326,7 +1466,9 @@ def save_bbc_series_metadata(
 
     artwork_saved_for: set[tuple[Path, int]] = set()
     for group, episode_meta in sorted(resolved, key=lambda item: (item[0].season, item[0].episode, item[0].episode_id)):
-        prepared = prepare_bbc_media_group(episode_meta, group, settings)
+        prepared = prepare_bbc_media_group(
+            episode_meta, group, settings, skip_existing=skip_existing
+        )
         video = next((path for path in prepared.files if path.suffix.casefold() in VIDEO_EXTENSIONS), None)
         if not video:
             unresolved.append(f"S{group.season:02d}E{group.episode:02d} (no video file)")
@@ -1456,7 +1598,10 @@ def bbc_queue_show_folder(folder: Path, meta: Metadata) -> Path:
 
 
 def prepare_bbc_queue_media_group(
-    meta: Metadata, group: BBCMediaGroup, settings: dict[str, Any]
+    meta: Metadata,
+    group: BBCMediaGroup,
+    settings: dict[str, Any],
+    skip_existing: bool = False,
 ) -> BBCMediaGroup:
     rename = bool(settings.get("bbc_series_rename_enabled", True))
     organize = bool(settings.get("bbc_series_organize_enabled", True))
@@ -1472,10 +1617,19 @@ def prepare_bbc_queue_media_group(
     for source in group.files:
         suffix = source.name[len(group.stem):]
         target = destination / ((base + suffix) if rename else source.name)
-        if target in used or (target.exists() and target not in group.files):
+        if target in used:
             raise FileExistsError(f"BBC iPlayer rename target already exists: {target}")
         used.add(target)
         targets.append((source, target))
+    if resolve_or_validate_media_targets(
+        targets, group.files, "BBC iPlayer", skip_existing=skip_existing
+    ):
+        final_files = [target for _source, target in targets]
+        video = next((path for path in final_files if path.suffix.casefold() in VIDEO_EXTENSIONS), None)
+        return BBCMediaGroup(
+            destination, video.stem if video else base, group.season, group.episode,
+            group.episode_id, group.episode_name, final_files,
+        )
     destination.mkdir(parents=True, exist_ok=True)
     temporary: list[tuple[Path, Path]] = []
     for index, (source, target) in enumerate(targets, start=1):
@@ -1557,7 +1711,9 @@ def save_bbc_queue_series_metadata(
     bundled: set[Path] = set()
     for group, record in matches:
         episode_meta = bbc_queue_episode_metadata(meta, record)
-        prepared = prepare_bbc_queue_media_group(episode_meta, group, settings)
+        prepared = prepare_bbc_queue_media_group(
+            episode_meta, group, settings, skip_existing=skip_existing
+        )
         show_folder = bbc_queue_show_folder(prepared.folder, episode_meta)
         if show_folder not in bundled:
             saved.extend(save_bbc_queue_series_bundle(meta, show_folder))
@@ -1701,14 +1857,16 @@ def save_netflix_series_metadata(
             + (f" - {episode_meta.episode_title}" if episode_meta.episode_title else "")
         )
         targets = [(source, destination / (base + source.name[len(group.stem):])) for source in group.files]
-        if any(target.exists() and target not in group.files for _source, target in targets):
-            raise FileExistsError(f"Netflix rename target already exists under {destination}")
-        destination.mkdir(parents=True, exist_ok=True)
-        for index, (source, target) in enumerate(targets, start=1):
-            if source == target:
-                continue
-            temporary = source.with_name(f".netflix-queue-{index}-{source.name}")
-            source.rename(temporary); temporary.rename(target)
+        duplicate = resolve_or_validate_media_targets(
+            targets, group.files, "Netflix", skip_existing=skip_existing
+        )
+        if not duplicate:
+            destination.mkdir(parents=True, exist_ok=True)
+            for index, (source, target) in enumerate(targets, start=1):
+                if source == target:
+                    continue
+                temporary = source.with_name(f".netflix-queue-{index}-{source.name}")
+                source.rename(temporary); temporary.rename(target)
         video = next((target for _source, target in targets if target.suffix.casefold() in VIDEO_EXTENSIONS), None)
         canonical = show_folder
         if canonical not in bundled:
@@ -1884,7 +2042,10 @@ def crunchyroll_subtitle_role(path: Path, sibling_cue_counts: list[int] | None =
 
 
 def prepare_crunchyroll_media_group(
-    meta: Metadata, group: CrunchyrollMediaGroup, settings: dict[str, Any]
+    meta: Metadata,
+    group: CrunchyrollMediaGroup,
+    settings: dict[str, Any],
+    skip_existing: bool = False,
 ) -> CrunchyrollMediaGroup:
     rename = bool(settings.get("crunchyroll_series_rename_enabled", True))
     organize = bool(settings.get("crunchyroll_series_organize_enabled", True))
@@ -1932,10 +2093,23 @@ def prepare_crunchyroll_media_group(
                 duplicate_number += 1
         else:
             target = destination / f"{base}{source.name[len(group.stem):]}"
-        if target.exists() and target not in group.files:
-            raise FileExistsError(f"Crunchyroll rename target already exists: {target}")
         used.add(target)
         targets.append((source, target))
+    if resolve_or_validate_media_targets(
+        targets, group.files, "Crunchyroll", skip_existing=skip_existing
+    ):
+        for discarded in discarded_subtitles:
+            if discarded.exists():
+                discarded.unlink()
+        final_files = [target for _source, target in targets]
+        video = next((path for path in final_files if path.suffix.casefold() in VIDEO_EXTENSIONS), None)
+        return CrunchyrollMediaGroup(
+            folder=destination,
+            stem=video.stem if video else base,
+            season=group.season,
+            episode=group.episode,
+            files=final_files,
+        )
     destination.mkdir(parents=True, exist_ok=True)
     temporary: list[tuple[Path, Path]] = []
     for index, (source, target) in enumerate(targets, start=1):
@@ -2207,7 +2381,9 @@ def save_crunchyroll_series_metadata(
         episode_meta.show_title = meta.show_title or meta.title
         episode_meta.season_number = str(group.season)
         episode_meta.episode_number = str(group.episode)
-        prepared = prepare_crunchyroll_media_group(episode_meta, group, settings)
+        prepared = prepare_crunchyroll_media_group(
+            episode_meta, group, settings, skip_existing=skip_existing
+        )
         show_folder = crunchyroll_show_folder(prepared.folder, episode_meta)
         if show_folder not in artwork_saved_for:
             saved.extend(ensure_crunchyroll_series_bundle(episode_meta, show_folder))
@@ -2357,7 +2533,10 @@ def migrate_disneyplus_series_folder(group: DisneyPlusMediaGroup, meta: Metadata
 
 
 def prepare_disneyplus_media_group(
-    meta: Metadata, group: DisneyPlusMediaGroup, settings: dict[str, Any]
+    meta: Metadata,
+    group: DisneyPlusMediaGroup,
+    settings: dict[str, Any],
+    skip_existing: bool = False,
 ) -> DisneyPlusMediaGroup:
     rename = bool(settings.get("disneyplus_series_rename_enabled", True))
     organize = bool(settings.get("disneyplus_series_organize_enabled", True))
@@ -2375,10 +2554,18 @@ def prepare_disneyplus_media_group(
     for source in group.files:
         suffix = source.name[len(group.stem):]
         target = destination / ((base + suffix) if rename else source.name)
-        if target in used or (target.exists() and target not in group.files):
+        if target in used:
             raise FileExistsError(f"Disney+ rename target already exists: {target}")
         used.add(target)
         targets.append((source, target))
+    if resolve_or_validate_media_targets(
+        targets, group.files, "Disney+", skip_existing=skip_existing
+    ):
+        final_files = [target for _source, target in targets]
+        video = next((path for path in final_files if path.suffix.casefold() in VIDEO_EXTENSIONS), None)
+        return DisneyPlusMediaGroup(
+            destination, video.stem if video else base, group.season, group.episode, final_files
+        )
     destination.mkdir(parents=True, exist_ok=True)
     temporary: list[tuple[Path, Path]] = []
     for index, (source, target) in enumerate(targets, start=1):
@@ -2488,7 +2675,9 @@ def save_disneyplus_series_metadata(
         ) else disneyplus_episode_metadata(meta, record)
         episode_meta.season_number = str(group.season)
         episode_meta.episode_number = str(group.episode)
-        prepared = prepare_disneyplus_media_group(episode_meta, group, settings)
+        prepared = prepare_disneyplus_media_group(
+            episode_meta, group, settings, skip_existing=skip_existing
+        )
         show_folder = disneyplus_show_folder(prepared.folder, episode_meta)
         if show_folder not in bundled:
             saved.extend(ensure_disneyplus_series_bundle(meta if meta.media_kind.casefold() == "series" else episode_meta, show_folder))
@@ -2617,7 +2806,10 @@ def hbomax_show_folder(folder: Path, meta: Metadata) -> Path:
 
 
 def prepare_hbomax_media_group(
-    meta: Metadata, group: HBOMaxMediaGroup, settings: dict[str, Any]
+    meta: Metadata,
+    group: HBOMaxMediaGroup,
+    settings: dict[str, Any],
+    skip_existing: bool = False,
 ) -> HBOMaxMediaGroup:
     rename = bool(settings.get("hbomax_series_rename_enabled", True))
     organize = bool(settings.get("hbomax_series_organize_enabled", True))
@@ -2633,9 +2825,17 @@ def prepare_hbomax_media_group(
     for source in group.files:
         suffix = source.name[len(group.stem):]
         target = destination / ((base + suffix) if rename else source.name)
-        if target in used or (target.exists() and target not in group.files):
+        if target in used:
             raise FileExistsError(f"HBO Max rename target already exists: {target}")
         used.add(target); targets.append((source, target))
+    if resolve_or_validate_media_targets(
+        targets, group.files, "HBO Max", skip_existing=skip_existing
+    ):
+        files = [target for _source, target in targets]
+        video = next((path for path in files if path.suffix.casefold() in VIDEO_EXTENSIONS), None)
+        return HBOMaxMediaGroup(
+            destination, video.stem if video else base, group.season, group.episode, files
+        )
     destination.mkdir(parents=True, exist_ok=True)
     temporary: list[tuple[Path, Path]] = []
     for index, (source, target) in enumerate(targets, start=1):
@@ -2963,7 +3163,9 @@ def save_hbomax_series_metadata(
         episode_meta = meta if (
             meta.media_kind.casefold() == "episode" and meta.season_number == str(group.season) and meta.episode_number == str(group.episode)
         ) else hbomax_episode_metadata(meta, record)
-        prepared = prepare_hbomax_media_group(episode_meta, group, settings)
+        prepared = prepare_hbomax_media_group(
+            episode_meta, group, settings, skip_existing=skip_existing
+        )
         show_folder = hbomax_show_folder(prepared.folder, episode_meta)
         if show_folder not in bundled:
             saved.extend(ensure_hbomax_series_bundle(meta if meta.media_kind.casefold() == "series" else episode_meta, show_folder)); bundled.add(show_folder)
@@ -3134,7 +3336,10 @@ def migrate_amazon_prime_series_folder(group: AmazonPrimeMediaGroup, meta: Metad
 
 
 def prepare_amazon_prime_media_group(
-    meta: Metadata, group: AmazonPrimeMediaGroup, settings: dict[str, Any]
+    meta: Metadata,
+    group: AmazonPrimeMediaGroup,
+    settings: dict[str, Any],
+    skip_existing: bool = False,
 ) -> AmazonPrimeMediaGroup:
     rename = bool(settings.get("amazon_prime_series_rename_enabled", True))
     organize = bool(settings.get("amazon_prime_series_organize_enabled", True))
@@ -3152,10 +3357,18 @@ def prepare_amazon_prime_media_group(
     for source in group.files:
         suffix = source.name[len(group.stem):]
         target = destination / ((base + suffix) if rename else source.name)
-        if target in used or (target.exists() and target not in group.files):
+        if target in used:
             raise FileExistsError(f"Amazon Prime Video rename target already exists: {target}")
         used.add(target)
         targets.append((source, target))
+    if resolve_or_validate_media_targets(
+        targets, group.files, "Amazon Prime Video", skip_existing=skip_existing
+    ):
+        final_files = [target for _source, target in targets]
+        video = next((path for path in final_files if path.suffix.casefold() in VIDEO_EXTENSIONS), None)
+        return AmazonPrimeMediaGroup(
+            destination, video.stem if video else base, group.season, group.episode, final_files
+        )
     destination.mkdir(parents=True, exist_ok=True)
     temporary: list[tuple[Path, Path]] = []
     for index, (source, target) in enumerate(targets, start=1):
@@ -3466,7 +3679,9 @@ def save_amazon_prime_series_metadata(
             and meta.season_number == str(group.season)
             and meta.episode_number == str(group.episode)
         ) else amazon_prime_episode_metadata(meta, record)
-        prepared = prepare_amazon_prime_media_group(episode_meta, group, settings)
+        prepared = prepare_amazon_prime_media_group(
+            episode_meta, group, settings, skip_existing=skip_existing
+        )
         show_folder = amazon_prime_show_folder(prepared.folder, episode_meta)
         if show_folder not in bundled:
             saved.extend(ensure_amazon_prime_series_bundle(meta if meta.media_kind.casefold() == "series" else episode_meta, show_folder))
@@ -3628,7 +3843,10 @@ def pbs_kids_show_folder(folder: Path, meta: Metadata) -> Path:
 
 
 def prepare_pbs_kids_media_group(
-    meta: Metadata, group: PBSKidsMediaGroup, settings: dict[str, Any]
+    meta: Metadata,
+    group: PBSKidsMediaGroup,
+    settings: dict[str, Any],
+    skip_existing: bool = False,
 ) -> PBSKidsMediaGroup:
     rename = bool(settings.get("pbs_kids_series_rename_enabled", True))
     organize = bool(settings.get("pbs_kids_series_organize_enabled", True))
@@ -3644,10 +3862,18 @@ def prepare_pbs_kids_media_group(
     for source in group.files:
         suffix = source.name[len(group.stem):]
         target = destination / ((base + suffix) if rename else source.name)
-        if target in used or (target.exists() and target not in group.files):
+        if target in used:
             raise FileExistsError(f"PBS KIDS rename target already exists: {target}")
         used.add(target)
         targets.append((source, target))
+    if resolve_or_validate_media_targets(
+        targets, group.files, "PBS KIDS", skip_existing=skip_existing
+    ):
+        final_files = [target for _source, target in targets]
+        video = next((path for path in final_files if path.suffix.casefold() in VIDEO_EXTENSIONS), None)
+        return PBSKidsMediaGroup(
+            destination, video.stem if video else base, group.season, group.episode, final_files
+        )
     destination.mkdir(parents=True, exist_ok=True)
     temporary: list[tuple[Path, Path]] = []
     for index, (source, target) in enumerate(targets, start=1):
@@ -3794,7 +4020,9 @@ def save_pbs_kids_series_metadata(
     bundled: set[Path] = set()
     for group, record in matches:
         episode_meta = pbs_kids_episode_metadata(meta, record)
-        prepared = prepare_pbs_kids_media_group(episode_meta, group, settings)
+        prepared = prepare_pbs_kids_media_group(
+            episode_meta, group, settings, skip_existing=skip_existing
+        )
         video = next((path for path in prepared.files if path.suffix.casefold() in VIDEO_EXTENSIONS), None)
         if not video:
             continue
@@ -3993,6 +4221,7 @@ def prepare_paramountplus_media_group(
     group: ParamountPlusMediaGroup,
     settings: dict[str, Any],
     explicit_show_folder: Path | None = None,
+    skip_existing: bool = False,
 ) -> ParamountPlusMediaGroup:
     rename = bool(settings.get("paramountplus_series_rename_enabled", True))
     organize = bool(settings.get("paramountplus_series_organize_enabled", True))
@@ -4010,10 +4239,18 @@ def prepare_paramountplus_media_group(
     for source in group.files:
         suffix = source.name[len(group.stem):]
         target = destination / ((base + suffix) if rename else source.name)
-        if target in used or (target.exists() and target not in group.files):
+        if target in used:
             raise FileExistsError(f"Paramount+ rename target already exists: {target}")
         used.add(target)
         targets.append((source, target))
+    if resolve_or_validate_media_targets(
+        targets, group.files, "Paramount+", skip_existing=skip_existing
+    ):
+        final_files = [target for _source, target in targets]
+        video = next((path for path in final_files if path.suffix.casefold() in VIDEO_EXTENSIONS), None)
+        return ParamountPlusMediaGroup(
+            destination, video.stem if video else base, group.season, group.episode, final_files
+        )
     destination.mkdir(parents=True, exist_ok=True)
     temporary: list[tuple[Path, Path]] = []
     for index, (source, target) in enumerate(targets, start=1):
@@ -4245,7 +4482,11 @@ def save_paramountplus_series_metadata(
         episode_meta.season_number = str(group.season)
         episode_meta.episode_number = str(group.episode)
         prepared = prepare_paramountplus_media_group(
-            episode_meta, group, settings, explicit_show_folder=explicit_show_folder
+            episode_meta,
+            group,
+            settings,
+            explicit_show_folder=explicit_show_folder,
+            skip_existing=skip_existing,
         )
         show_folder = explicit_show_folder or paramountplus_show_folder(prepared.folder, episode_meta)
         if show_folder not in bundled:
@@ -4351,14 +4592,27 @@ def save_provider_series_metadata(
     )
 
 
-def output_plan(meta: Metadata, settings: dict[str, Any], explicit_folder: str = "") -> tuple[Path, str]:
+def output_plan(
+    meta: Metadata,
+    settings: dict[str, Any],
+    explicit_folder: str = "",
+    skip_existing: bool = False,
+) -> tuple[Path, str]:
     match = find_media_match(meta, settings, explicit_folder=explicit_folder)
     if match:
         match = maybe_rename_generic_video(match, meta, settings)
-        match = organize_netflix_movie(match, meta, explicit_folder=explicit_folder)
-        match = organize_disneyplus_movie(match, meta, settings, explicit_folder=explicit_folder)
-        match = organize_hbomax_movie(match, meta, settings, explicit_folder=explicit_folder)
-        match = organize_paramountplus_movie(match, meta, settings, explicit_folder=explicit_folder)
+        match = organize_netflix_movie(
+            match, meta, explicit_folder=explicit_folder, skip_existing=skip_existing
+        )
+        match = organize_disneyplus_movie(
+            match, meta, settings, explicit_folder=explicit_folder, skip_existing=skip_existing
+        )
+        match = organize_hbomax_movie(
+            match, meta, settings, explicit_folder=explicit_folder, skip_existing=skip_existing
+        )
+        match = organize_paramountplus_movie(
+            match, meta, settings, explicit_folder=explicit_folder, skip_existing=skip_existing
+        )
         return match.folder, match.filename_base
     if is_disneyplus_movie(meta):
         base = disneyplus_movie_name(meta)
@@ -4469,7 +4723,12 @@ def nfo_path(folder: Path, base_name: str) -> Path:
 
 
 def save_metadata_bundle(meta: Metadata, settings: dict[str, Any], explicit_folder: str = "", skip_existing: bool = False) -> list[Path]:
-    folder, base_name = output_plan(meta, settings, explicit_folder=explicit_folder)
+    folder, base_name = output_plan(
+        meta,
+        settings,
+        explicit_folder=explicit_folder,
+        skip_existing=skip_existing,
+    )
     saved: list[Path] = []
     crunchyroll_series_folder: Path | None = None
     disneyplus_series_folder: Path | None = None
