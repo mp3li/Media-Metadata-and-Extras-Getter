@@ -133,7 +133,7 @@ class QueueModeContractTests(unittest.TestCase):
             (
                 "Netflix",
                 lambda match, meta: base.organize_netflix_movie(
-                    match, meta, explicit_folder=str(match.video_path), skip_existing=True
+                    match, meta, {}, explicit_folder=str(match.video_path), skip_existing=True
                 ),
                 {},
             ),

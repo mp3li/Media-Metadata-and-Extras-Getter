@@ -644,7 +644,9 @@ The values come from the selected Prime Video detail page and can change; the ta
 
 ## Netflix Queue Mode
 
-Netflix movie handoffs use the supplied MediaFab destination and create `Movie Title (Year)/` there, moving only the matched video and its directly linked subtitle sidecars after collision checks. Available source-faithful poster, backdrop, transparent logo, direct public trailer, and extra videos are saved in their Jellyfin roles; optional video work runs after metadata and organization.
+Ordinary Netflix movie processing, including an enabled local-media match, uses `Output/Netflix/Movie Title (Year)/` and gives the movie, subtitle sidecars, NFO, and title artwork the same `Movie Title (Year)` base. Netflix movie handoffs instead use the supplied MediaFab destination and create exactly one `Movie Title (Year)/` there, without nesting a second copy when the completed file is already inside that canonical folder. Both paths validate collisions before moving anything. Available source-faithful poster, backdrop, transparent logo, direct public trailer, and extra videos are saved in their Jellyfin roles; optional video work runs after metadata and organization.
+
+When an ordinary Netflix series or episode link has no matching local media, MME still saves a metadata-only bundle under `Output/Series Title (Year Range)/` (and `S01/` for an episode). A partial public catalog prevents series-wide media organization, but it does not suppress the safe title-level metadata bundle.
 
 For MediaFab individual mode and Queue Mode, pass the current Netflix `/watch/<episode-id>` link with that one exact completed file. MME follows Netflix's public canonical relationship to the parent show, locates that episode ID in the public season graph, and uses the proven season/episode placement even when the downloader filename is anonymous. That invocation immediately adds the media and its subtitle sidecars to the reusable year-qualified series root, writes the episode NFO and one matching thumbnail, and ensures the root `tvshow.nfo`, available series artwork, trailer, and extras exist. It never waits for the queue to finish.
 
@@ -799,7 +801,7 @@ Output/Example Movie/Extras/Trailers/trailer.mp4
 Output/Example Movie/extrafanart/fanart-01.jpg
 ```
 
-Disney+ and Paramount+ movies are the exceptions during ordinary link processing: they save under `Output/<Provider>/Movie Title (Year)/` and use `Movie Title (Year)` for their metadata, artwork, and local matched movie filename. During Disney+, Max, Paramount+, or Netflix MediaFab movie handoffs, the year-qualified movie folder remains beneath the supplied media location. Provider-native direct trailers use Jellyfin's `trailers/trailer.mp4` layout and run only after the main workflow.
+Disney+, HBO Max, Netflix, and Paramount+ movies save under `Output/<Provider>/Movie Title (Year)/` during ordinary link processing and use `Movie Title (Year)` for their metadata, artwork, and local matched movie filename. During their MediaFab movie handoffs, the year-qualified movie folder remains beneath the supplied media location. Provider-native direct trailers use Jellyfin's `trailers/trailer.mp4` layout and run only after the main workflow.
 
 When media matching finds a local video, the real filename replaces `<title>` in the NFO and artwork names. Available extra videos are saved under `Extras/Videos/`.
 

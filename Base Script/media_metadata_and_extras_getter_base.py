@@ -989,13 +989,20 @@ def netflix_movie_name(meta: Metadata) -> str:
 
 
 def organize_netflix_movie(
-    match: MediaMatch, meta: Metadata, explicit_folder: str = "", skip_existing: bool = False
+    match: MediaMatch,
+    meta: Metadata,
+    settings: dict[str, Any],
+    explicit_folder: str = "",
+    skip_existing: bool = False,
 ) -> MediaMatch:
     if not is_netflix_movie(meta) or not match.video_path.exists():
         return match
     base = netflix_movie_name(meta)
-    destination_parent = match.folder if explicit_folder else match.folder
-    destination = destination_parent / base
+    destination = (
+        match.folder
+        if explicit_folder and normalize_match_key(match.folder.name) == normalize_match_key(base)
+        else (match.folder if explicit_folder else settings_output_dir(settings) / netflix.NAME) / base
+    )
     source_stem = match.video_path.stem
     related = [
         path for path in match.folder.iterdir()
@@ -1892,6 +1899,52 @@ def save_netflix_extra_videos(meta: Metadata, folder: Path) -> list[Path]:
     return saved
 
 
+def save_netflix_show_art(meta: Metadata, folder: Path) -> list[Path]:
+    saved: list[Path] = []
+    for name, url in (
+        ("poster", meta.poster_url),
+        ("backdrop", meta.fanart_url),
+        ("logo", meta.logo_url),
+    ):
+        if not clean_text(url):
+            continue
+        fallback = ".png" if name == "logo" else ".jpg"
+        target = folder / f"{name}{image_extension_from_url(url) or fallback}"
+        if target.exists():
+            continue
+        path = download_binary(url, target)
+        if path:
+            saved.append(path)
+    return saved
+
+
+def ensure_netflix_series_bundle(meta: Metadata, folder: Path) -> list[Path]:
+    series = netflix_parent_series_meta(meta)
+    folder.mkdir(parents=True, exist_ok=True)
+    saved: list[Path] = []
+    nfo = folder / "tvshow.nfo"
+    if not nfo.exists():
+        nfo.write_text(build_nfo(series), encoding="utf-8")
+        saved.append(nfo)
+    saved.extend(save_netflix_show_art(series, folder))
+    return saved
+
+
+def save_netflix_series_optional_videos(meta: Metadata, folder: Path) -> list[Path]:
+    series = netflix_parent_series_meta(meta)
+    saved: list[Path] = []
+    if series.trailer_url:
+        trailer_dir = folder / "trailers"
+        trailer_target = trailer_dir / "trailer.mp4"
+        if not trailer_target.exists():
+            trailer_dir.mkdir(parents=True, exist_ok=True)
+            trailer = download_binary(series.trailer_url, trailer_target)
+            if trailer:
+                saved.append(trailer)
+    saved.extend(save_netflix_extra_videos(series, folder))
+    return saved
+
+
 def save_netflix_series_metadata(
     meta: Metadata,
     settings: dict[str, Any],
@@ -1903,15 +1956,18 @@ def save_netflix_series_metadata(
     series = netflix_parent_series_meta(meta)
     catalog = meta.series_episodes or series.series_episodes
     if not catalog:
-        print("Netflix Queue Mode skipped: the public title page did not expose an identifiable episode catalog.")
-        return []
+        if explicit_folder:
+            print("Netflix Queue Mode skipped: the public title page did not expose an identifiable episode catalog.")
+            return []
+        print("Netflix series organization skipped: saving the title-level metadata bundle without moving media.")
+        return None
     meta.series_episodes = list(catalog)
     if not explicit_folder and not netflix_catalog_is_complete(series):
-        print("Netflix Queue Mode skipped: the public title page exposed only a partial episode catalog.")
-        return []
+        print("Netflix series organization skipped: saving metadata only because the public catalog is partial.")
+        return None
     matches = netflix_media_groups(meta, settings, explicit_folder)
     if not matches:
-        return []
+        return [] if explicit_folder else None
     saved: list[Path] = []
     bundled: set[Path] = set()
     explicit_show_folder = netflix_explicit_show_folder(explicit_folder, series)
@@ -1944,22 +2000,7 @@ def save_netflix_series_metadata(
         video = next((target for _source, target in targets if target.suffix.casefold() in VIDEO_EXTENSIONS), None)
         canonical = show_folder
         if canonical not in bundled:
-            canonical.mkdir(parents=True, exist_ok=True)
-            nfo = canonical / "tvshow.nfo"
-            if not nfo.exists():
-                nfo.write_text(build_nfo(series), encoding="utf-8"); saved.append(nfo)
-            for name, url in (
-                ("poster", series.poster_url),
-                ("backdrop", series.fanart_url),
-                ("logo", series.logo_url),
-            ):
-                if clean_text(url):
-                    fallback = ".png" if name == "logo" else ".jpg"
-                    target = canonical / f"{name}{image_extension_from_url(url) or fallback}"
-                    if not target.exists():
-                        path = download_binary(url, target)
-                        if path:
-                            saved.append(path)
+            saved.extend(ensure_netflix_series_bundle(series, canonical))
             bundled.add(canonical)
         if not video:
             continue
@@ -1972,14 +2013,7 @@ def save_netflix_series_metadata(
             if path:
                 saved.append(path)
     for canonical in bundled:
-        if series.trailer_url:
-            trailer_dir = canonical / "trailers"; trailer_dir.mkdir(parents=True, exist_ok=True)
-            trailer_target = trailer_dir / "trailer.mp4"
-            if not trailer_target.exists():
-                trailer = download_binary(series.trailer_url, trailer_target)
-                if trailer:
-                    saved.append(trailer)
-        saved.extend(save_netflix_extra_videos(series, canonical))
+        saved.extend(save_netflix_series_optional_videos(series, canonical))
     print(f"Netflix Queue Mode found {len(matches)} local episode(s) and saved {len(saved)} item(s).")
     return saved
 
@@ -4683,7 +4717,11 @@ def output_plan(
     if match:
         match = maybe_rename_generic_video(match, meta, settings)
         match = organize_netflix_movie(
-            match, meta, explicit_folder=explicit_folder, skip_existing=skip_existing
+            match,
+            meta,
+            settings,
+            explicit_folder=explicit_folder,
+            skip_existing=skip_existing,
         )
         match = organize_disneyplus_movie(
             match, meta, settings, explicit_folder=explicit_folder, skip_existing=skip_existing
@@ -4707,6 +4745,25 @@ def output_plan(
     if is_netflix_movie(meta):
         base = netflix_movie_name(meta)
         return settings_output_dir(settings) / netflix.NAME / base, base
+    if meta.source_site == netflix.NAME and meta.media_kind.casefold() == "series":
+        return settings_output_dir(settings) / netflix_series_folder_name(meta), "tvshow"
+    if (
+        meta.source_site == netflix.NAME
+        and meta.media_kind.casefold() == "episode"
+        and meta.season_number.isdigit()
+        and meta.episode_number.isdigit()
+    ):
+        base = safe_filename(
+            f"S{int(meta.season_number):02d}E{int(meta.episode_number):02d} "
+            f"{meta.show_title or meta.title}"
+            + (f" - {meta.episode_title}" if meta.episode_title else "")
+        )
+        return (
+            settings_output_dir(settings)
+            / netflix_series_folder_name(meta)
+            / f"S{int(meta.season_number):02d}",
+            base,
+        )
     if meta.source_site == amazon.PRIME_NAME and meta.media_kind.casefold() == "series":
         return settings_output_dir(settings) / amazon_prime_series_folder_name(meta), "tvshow"
     if (
@@ -4811,12 +4868,16 @@ def save_metadata_bundle(meta: Metadata, settings: dict[str, Any], explicit_fold
         skip_existing=skip_existing,
     )
     saved: list[Path] = []
+    netflix_series_folder: Path | None = None
     crunchyroll_series_folder: Path | None = None
     disneyplus_series_folder: Path | None = None
     hbomax_series_folder: Path | None = None
     paramountplus_series_folder: Path | None = None
     pbs_kids_series_folder: Path | None = None
     amazon_prime_series_folder: Path | None = None
+    if meta.source_site == netflix.NAME and meta.media_kind.casefold() == "episode":
+        netflix_series_folder = netflix_show_folder(folder, meta)
+        saved.extend(ensure_netflix_series_bundle(meta, netflix_series_folder))
     if meta.source_site == amazon.PRIME_NAME and meta.media_kind.casefold() == "episode":
         amazon_prime_series_folder = amazon_prime_show_folder(folder, meta)
         saved.extend(ensure_amazon_prime_series_bundle(meta, amazon_prime_series_folder))
@@ -4836,6 +4897,9 @@ def save_metadata_bundle(meta: Metadata, settings: dict[str, Any], explicit_fold
         paramountplus_series_folder = paramountplus_show_folder(folder, meta)
         saved.extend(ensure_paramountplus_series_bundle(meta, paramountplus_series_folder))
     saved.extend(save_metadata_bundle_to_location(meta, folder, base_name, skip_existing=skip_existing))
+    if meta.source_site == netflix.NAME and meta.media_kind.casefold() in {"series", "episode"}:
+        netflix_series_folder = netflix_series_folder or netflix_show_folder(folder, meta)
+        saved.extend(save_netflix_series_optional_videos(meta, netflix_series_folder))
     if meta.source_site == crunchyroll.NAME:
         crunchyroll_series_folder = crunchyroll_series_folder or crunchyroll_show_folder(folder, meta)
         saved.extend(save_crunchyroll_series_trailer(meta, crunchyroll_series_folder))
@@ -4933,7 +4997,14 @@ def save_metadata_bundle_to_location(
             if path:
                 saved.append(path)
     if meta.source_site == crunchyroll.NAME or (
-        meta.source_site in {disneyplus.NAME, hbomax.NAME, paramountplus.NAME, pbs_kids.NAME, amazon.PRIME_NAME}
+        meta.source_site in {
+            netflix.NAME,
+            disneyplus.NAME,
+            hbomax.NAME,
+            paramountplus.NAME,
+            pbs_kids.NAME,
+            amazon.PRIME_NAME,
+        }
         and meta.media_kind.casefold() in {"series", "episode"}
     ):
         show_folder = folder
@@ -4941,6 +5012,8 @@ def save_metadata_bundle_to_location(
             show_folder = folder.parent
         if meta.source_site == crunchyroll.NAME:
             saved.extend(save_crunchyroll_show_art(meta, show_folder))
+        elif meta.source_site == netflix.NAME:
+            saved.extend(save_netflix_show_art(netflix_parent_series_meta(meta), show_folder))
         elif meta.source_site == amazon.PRIME_NAME:
             saved.extend(save_amazon_prime_show_art(meta, show_folder))
         elif meta.source_site == disneyplus.NAME:

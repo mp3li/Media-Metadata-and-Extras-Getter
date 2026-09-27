@@ -237,6 +237,51 @@ class NetflixProviderTests(unittest.TestCase):
             self.assertEqual(base.save_netflix_series_metadata(meta, {}, explicit_folder=temp), [])
             self.assertEqual(list(Path(temp).glob("*.nfo")), [])
 
+    def test_manual_series_without_a_media_match_saves_title_and_year_bundle(self):
+        with patch.object(netflix, "fetch_text", return_value=html_page(SERIES)):
+            meta = base.metadata_from_provider_dict(netflix.extract_metadata(SERIES_URL))
+        with tempfile.TemporaryDirectory() as temp:
+            settings = {"default_output_dir": temp, "media_folders": []}
+            self.assertIsNone(base.save_netflix_series_metadata(meta, settings))
+
+            def fake_download(_url: str, target: Path):
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_bytes(b"asset")
+                return target
+
+            with patch.object(base, "download_binary", side_effect=fake_download):
+                saved = base.save_metadata_bundle(meta, settings)
+
+            root = Path(temp) / "Example Show (2025)"
+            self.assertTrue((root / "tvshow.nfo").exists())
+            self.assertTrue((root / "backdrop.jpg").exists())
+            self.assertFalse((root / "fanart.jpg").exists())
+            self.assertTrue(saved)
+
+    def test_manual_episode_without_a_media_match_saves_under_series_year_and_season(self):
+        with patch.object(netflix, "fetch_text", return_value=graphql_page(GRAPH, SERIES)):
+            meta = base.metadata_from_provider_dict(netflix.extract_metadata(WATCH_URL))
+        with tempfile.TemporaryDirectory() as temp:
+            settings = {"default_output_dir": temp, "media_folders": []}
+            self.assertIsNone(base.save_netflix_series_metadata(meta, settings))
+
+            def fake_download(_url: str, target: Path):
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_bytes(b"asset")
+                return target
+
+            with patch.object(base, "download_binary", side_effect=fake_download):
+                saved = base.save_metadata_bundle(meta, settings)
+
+            root = Path(temp) / "Example Show (2025)"
+            episode = root / "S01" / "S01E01 Example Show - Beginning"
+            self.assertTrue((root / "tvshow.nfo").exists())
+            self.assertTrue(episode.with_suffix(".nfo").exists())
+            self.assertTrue(episode.with_name(episode.name + "-thumb.jpg").exists())
+            self.assertTrue((root / "trailers" / "trailer.mp4").exists())
+            self.assertTrue((root / "Extras" / "Videos" / "Behind the Scenes.mp4").exists())
+            self.assertTrue(saved)
+
     def test_movie_handoff_uses_year_folder_provider_tag_and_native_trailer(self):
         movie = dict(MOVIE)
         movie["trailer"] = {"url": "https://media.example/trailer.mp4"}
@@ -257,6 +302,63 @@ class NetflixProviderTests(unittest.TestCase):
             self.assertTrue((root / "Example Movie (2024).nfo").exists())
             self.assertTrue((root / "trailers" / "trailer.mp4").exists())
             self.assertFalse((root / "Example Movie (2024)-fanart.jpg").exists())
+
+    def test_maboroshi_matched_movie_uses_provider_title_and_year_folder(self):
+        meta = base.Metadata(
+            source_url="https://www.netflix.com/title/81450803",
+            source_site="Netflix",
+            media_kind="movie",
+            title="maboroshi",
+            year="2024",
+            tags=["Netflix Provider"],
+        )
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            source = root / "downloads"
+            source.mkdir()
+            video = source / "maboroshi.mkv"
+            subtitle = source / "maboroshi.en.srt"
+            video.write_bytes(b"video")
+            subtitle.write_text("subtitle", encoding="utf-8")
+            output = root / "Output"
+            settings = {
+                "default_output_dir": str(output),
+                "media_matching_enabled": True,
+                "media_folders": [str(source)],
+            }
+
+            saved = base.save_metadata_bundle(meta, settings)
+
+            destination = output / "Netflix" / "maboroshi (2024)"
+            self.assertTrue((destination / "maboroshi (2024).mkv").exists())
+            self.assertTrue((destination / "maboroshi (2024).en.srt").exists())
+            self.assertTrue((destination / "maboroshi (2024).nfo").exists())
+            self.assertFalse(video.exists())
+            self.assertFalse(subtitle.exists())
+            self.assertFalse((source / "maboroshi (2024)").exists())
+            self.assertTrue(saved)
+
+    def test_maboroshi_handoff_does_not_nest_an_existing_title_folder(self):
+        meta = base.Metadata(
+            source_url="https://www.netflix.com/title/81450803",
+            source_site="Netflix",
+            media_kind="movie",
+            title="maboroshi",
+            year="2024",
+            tags=["Netflix Provider"],
+        )
+        with tempfile.TemporaryDirectory() as temp:
+            destination = Path(temp) / "maboroshi (2024)"
+            destination.mkdir()
+            video = destination / "maboroshi (2024).mkv"
+            video.write_bytes(b"video")
+
+            saved = base.save_metadata_bundle(meta, {}, explicit_folder=str(video))
+
+            self.assertTrue(video.exists())
+            self.assertTrue((destination / "maboroshi (2024).nfo").exists())
+            self.assertFalse((destination / "maboroshi (2024)").exists())
+            self.assertTrue(saved)
 
 
 if __name__ == "__main__":
