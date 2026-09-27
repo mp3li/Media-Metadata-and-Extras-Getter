@@ -196,7 +196,7 @@ class PBSKidsProviderTests(unittest.TestCase):
             with patch.object(base, "download_binary", side_effect=lambda _url, target: target.write_bytes(b"art") or target):
                 saved = base.save_pbs_kids_series_metadata(meta, {}, explicit_folder=str(video))
             root = Path(temp) / "Wild Kratts"
-            season = root / "S07"
+            season = root / "Season 07"
             stem = "S07E17 Wild Kratts - Duck, Duck, Loon!"
             self.assertTrue((season / f"{stem}.mp4").exists())
             self.assertTrue((season / f"{stem}.en.srt").exists())
@@ -222,7 +222,7 @@ class PBSKidsProviderTests(unittest.TestCase):
     def test_broad_root_rejects_unrelated_episode_number(self):
         meta = base.metadata_from_provider_dict(self.extract(SERIES_URL))
         with tempfile.TemporaryDirectory() as temp:
-            unrelated = Path(temp) / "Another Show" / "S07"
+            unrelated = Path(temp) / "Another Show" / "Season 07"
             unrelated.mkdir(parents=True)
             (unrelated / "S07E17 Another Show.mp4").write_bytes(b"video")
             self.assertEqual(base.pbs_kids_media_groups(meta, {"media_folders": [temp]}), [])

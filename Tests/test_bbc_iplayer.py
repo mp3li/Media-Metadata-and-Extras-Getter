@@ -114,14 +114,14 @@ class BBCQueueModeTests(unittest.TestCase):
                 base.save_bbc_queue_series_metadata(meta, {}, explicit_folder=str(first))
                 show = root / "Example Show (2025-)"
                 series_nfo = show / "tvshow.nfo"
-                self.assertTrue((show / "S01" / "S01E01 Example Show - First.mkv").exists())
+                self.assertTrue((show / "Season 01" / "S01E01 Example Show - First.mkv").exists())
                 self.assertTrue(series_nfo.exists())
                 series_nfo.write_text("preserve me", encoding="utf-8")
 
                 second.write_bytes(b"two")
                 base.save_bbc_queue_series_metadata(meta, {}, explicit_folder=str(second))
             show = root / "Example Show (2025-)"
-            self.assertTrue((show / "S02" / "S02E01 Example Show - Return.mkv").exists())
+            self.assertTrue((show / "Season 02" / "S02E01 Example Show - Return.mkv").exists())
             self.assertTrue((show / "backdrop.jpg").exists())
             self.assertTrue((show / "thumb.jpg").exists())
             self.assertFalse((show / "poster.jpg").exists())

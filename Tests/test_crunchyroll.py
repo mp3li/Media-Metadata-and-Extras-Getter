@@ -281,7 +281,7 @@ class CrunchyrollProviderTests(unittest.TestCase):
 
             target_base = f"S01E01 {SHOW[:-1]} - {EPISODE_TITLE[:-1]}"
             show_folder = Path(temp) / base.crunchyroll_series_folder_name(series_meta)
-            season_folder = show_folder / "S01"
+            season_folder = show_folder / "Season 01"
             video = season_folder / f"{target_base}.mp4"
             nfo = season_folder / f"{target_base}.nfo"
             self.assertTrue(video.exists())
@@ -310,7 +310,7 @@ class CrunchyrollProviderTests(unittest.TestCase):
         episode_meta = base.metadata_from_provider_dict(self.extract_episode())
         with tempfile.TemporaryDirectory() as temp:
             show_folder = Path(temp) / SHOW
-            season_folder = show_folder / "S01"
+            season_folder = show_folder / "Season 01"
             season_folder.mkdir(parents=True)
             tvshow_nfo = show_folder / "tvshow.nfo"
             poster = show_folder / "poster.png"
@@ -362,7 +362,7 @@ class CrunchyrollProviderTests(unittest.TestCase):
             show_folder = Path(temp) / base.crunchyroll_series_folder_name(episode_meta)
             self.assertTrue((show_folder / "tvshow.nfo").exists())
             self.assertTrue((show_folder / "poster.png").exists())
-            episode_nfo = show_folder / "S01" / f"{base.crunchyroll_target_base(episode_meta)}.nfo"
+            episode_nfo = show_folder / "Season 01" / f"{base.crunchyroll_target_base(episode_meta)}.nfo"
             self.assertTrue(episode_nfo.exists())
             self.assertEqual(
                 ET.fromstring((show_folder / "tvshow.nfo").read_text(encoding="utf-8")).findtext("plot"),
@@ -484,7 +484,7 @@ class CrunchyrollProviderTests(unittest.TestCase):
             folder = Path(temp)
             source = folder / "E1.mp4"
             source.write_bytes(b"source")
-            season_folder = folder / base.crunchyroll_series_folder_name(episode_meta) / "S01"
+            season_folder = folder / base.crunchyroll_series_folder_name(episode_meta) / "Season 01"
             season_folder.mkdir(parents=True)
             target = season_folder / f"{base.crunchyroll_target_base(episode_meta)}.mp4"
             target.write_bytes(b"existing")
@@ -538,10 +538,10 @@ class CrunchyrollProviderTests(unittest.TestCase):
             second_prepared = base.prepare_crunchyroll_media_group(second_meta, second_group, settings)
 
             show_folder = download_folder / base.crunchyroll_series_folder_name(episode_meta)
-            self.assertEqual(first_prepared.folder, (show_folder / "S01").resolve())
-            self.assertEqual(second_prepared.folder, (show_folder / "S01").resolve())
-            self.assertTrue((show_folder / "S01" / f"{base.crunchyroll_target_base(episode_meta, first_group)}.mkv").exists())
-            self.assertTrue((show_folder / "S01" / f"{base.crunchyroll_target_base(second_meta, second_group)}.mkv").exists())
+            self.assertEqual(first_prepared.folder, (show_folder / "Season 01").resolve())
+            self.assertEqual(second_prepared.folder, (show_folder / "Season 01").resolve())
+            self.assertTrue((show_folder / "Season 01" / f"{base.crunchyroll_target_base(episode_meta, first_group)}.mkv").exists())
+            self.assertTrue((show_folder / "Season 01" / f"{base.crunchyroll_target_base(second_meta, second_group)}.mkv").exists())
             self.assertFalse((show_folder / base.safe_filename(SHOW)).exists())
 
     def test_relative_media_path_recognizes_current_series_folder(self):
@@ -574,7 +574,7 @@ class CrunchyrollProviderTests(unittest.TestCase):
                 os.chdir(previous_directory)
 
             show_folder = Path(temp) / base.crunchyroll_series_folder_name(episode_meta)
-            self.assertEqual(prepared.folder, (show_folder / "S01").resolve())
+            self.assertEqual(prepared.folder, (show_folder / "Season 01").resolve())
             self.assertFalse(legacy_folder.exists())
 
     def test_series_folder_name_uses_closed_and_current_year_ranges(self):
@@ -603,7 +603,7 @@ class CrunchyrollProviderTests(unittest.TestCase):
         episode_meta.series_is_current = False
         with tempfile.TemporaryDirectory() as temp:
             current_folder = Path(temp) / f"{base.safe_filename(SHOW)} (2026-)"
-            season_folder = current_folder / "S01"
+            season_folder = current_folder / "Season 01"
             season_folder.mkdir(parents=True)
             poster = current_folder / "poster.png"
             video = season_folder / "E1.mkv"
@@ -628,7 +628,7 @@ class CrunchyrollProviderTests(unittest.TestCase):
 
             closed_folder = Path(temp) / f"{base.safe_filename(SHOW)} (2026)"
             self.assertFalse(current_folder.exists())
-            self.assertEqual(prepared.folder, (closed_folder / "S01").resolve())
+            self.assertEqual(prepared.folder, (closed_folder / "Season 01").resolve())
             self.assertEqual((closed_folder / "poster.png").read_bytes(), b"poster")
 
     def test_english_cc_is_kept_and_forced_sign_track_is_discarded(self):
@@ -672,7 +672,7 @@ class CrunchyrollProviderTests(unittest.TestCase):
             target_base = base.crunchyroll_target_base(episode_meta, group)
             self.assertEqual(
                 prepared.folder,
-                (folder / base.crunchyroll_series_folder_name(episode_meta) / "S01").resolve(),
+                (folder / base.crunchyroll_series_folder_name(episode_meta) / "Season 01").resolve(),
             )
             self.assertTrue((prepared.folder / f"{target_base}.en.cc.srt").exists())
             self.assertFalse((prepared.folder / f"{target_base}.en.forced.srt").exists())

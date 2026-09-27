@@ -206,7 +206,7 @@ class AmazonPrimeProviderTests(unittest.TestCase):
             ):
                 saved = base.save_amazon_prime_series_metadata(meta, {}, explicit_folder=str(video))
             root = Path(temp) / "Example Show (2020-2021)"
-            season = root / "S01"
+            season = root / "Season 01"
             stem = "S01E01 Example Show - The Beginning"
             self.assertTrue((season / f"{stem}.mp4").exists())
             self.assertTrue((season / f"{stem}.en.srt").exists())
@@ -228,7 +228,7 @@ class AmazonPrimeProviderTests(unittest.TestCase):
             groups = base.amazon_prime_media_groups(meta, {}, explicit_folder=temp)
             self.assertEqual([(group.season, group.episode) for group, _record in groups], [(1, 1), (2, 2)])
         with tempfile.TemporaryDirectory() as temp:
-            unrelated = Path(temp) / "Another Show" / "S01"
+            unrelated = Path(temp) / "Another Show" / "Season 01"
             unrelated.mkdir(parents=True)
             (unrelated / "S01E01 Another Show.mp4").write_bytes(b"video")
             self.assertEqual(base.amazon_prime_media_groups(meta, {"media_folders": [temp]}), [])

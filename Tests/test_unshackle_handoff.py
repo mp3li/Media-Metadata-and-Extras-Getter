@@ -184,7 +184,7 @@ class UnshackleHandoffTests(unittest.TestCase):
     def test_series_catalog_is_reduced_to_only_the_completed_episode(self):
         with tempfile.TemporaryDirectory() as temp:
             show = Path(temp) / "Catalog Show (2024)"
-            season = show / "S02"
+            season = show / "Season 02"
             season.mkdir(parents=True)
             video = season / "Catalog.Show.S02E03.mkv"
             video.write_bytes(b"episode")

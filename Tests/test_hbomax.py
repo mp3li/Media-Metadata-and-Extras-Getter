@@ -173,16 +173,16 @@ class HBOMaxTests(unittest.TestCase):
                 saved = base.save_hbomax_series_metadata(meta, {}, explicit_folder=temp)
             root = Path(temp) / "Euphoria (2019-)"
             stem = "S01E01 Euphoria - Pilot"
-            self.assertTrue((root / "S01" / f"{stem}.mkv").exists())
-            self.assertTrue((root / "S01" / f"{stem}.nfo").exists())
-            self.assertTrue((root / "S01" / f"{stem}-thumb.jpg").exists())
-            self.assertFalse((root / "S01" / f"{stem}-poster.jpg").exists())
-            self.assertFalse((root / "S01" / f"{stem}-cover.jpg").exists())
+            self.assertTrue((root / "Season 01" / f"{stem}.mkv").exists())
+            self.assertTrue((root / "Season 01" / f"{stem}.nfo").exists())
+            self.assertTrue((root / "Season 01" / f"{stem}-thumb.jpg").exists())
+            self.assertFalse((root / "Season 01" / f"{stem}-poster.jpg").exists())
+            self.assertFalse((root / "Season 01" / f"{stem}-cover.jpg").exists())
             self.assertTrue((root / "tvshow.nfo").exists())
             self.assertIn("<tag>HBO Max Provider</tag>", (root / "tvshow.nfo").read_text(encoding="utf-8"))
             self.assertIn(
                 "<tag>HBO Max Provider</tag>",
-                (root / "S01" / f"{stem}.nfo").read_text(encoding="utf-8"),
+                (root / "Season 01" / f"{stem}.nfo").read_text(encoding="utf-8"),
             )
             self.assertTrue(saved)
             trailer.assert_called_once()
@@ -192,7 +192,7 @@ class HBOMaxTests(unittest.TestCase):
         meta = base.metadata_from_provider_dict(self.extract(EPISODE))
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp) / "Euphoria (2019-)"
-            season = root / "S01"
+            season = root / "Season 01"
             downloaded: list[tuple[str, Path]] = []
 
             def fake_download(url: str, target: Path):
@@ -211,15 +211,15 @@ class HBOMaxTests(unittest.TestCase):
                     "S01E01 Euphoria - Pilot",
                 )
 
-            episode_thumb = root / "S01" / "S01E01 Euphoria - Pilot-thumb.jpg"
+            episode_thumb = root / "Season 01" / "S01E01 Euphoria - Pilot-thumb.jpg"
             self.assertTrue(episode_thumb.exists())
             self.assertTrue((root / "backdrop.jpg").exists())
             self.assertTrue((root / "banner.jpg").exists())
             self.assertFalse((root / "thumb.jpg").exists())
             self.assertFalse((root / "extrafanart").exists())
-            self.assertFalse(any("poster" in path.name.casefold() for path in (root / "S01").iterdir()))
+            self.assertFalse(any("poster" in path.name.casefold() for path in (root / "Season 01").iterdir()))
             self.assertEqual(
-                [(url, path) for url, path in downloaded if path.parent == root / "S01"],
+                [(url, path) for url, path in downloaded if path.parent == root / "Season 01"],
                 [("https://img.example/episode-1-thumb.jpg", episode_thumb)],
             )
             self.assertIn(("https://img.example/backdrop.jpg", root / "backdrop.jpg"), downloaded)
@@ -323,7 +323,7 @@ class HBOMaxTests(unittest.TestCase):
                 base, "download_binary", side_effect=fake_download
             ):
                 saved = base.save_hbomax_extra_videos(meta, Path(temp))
-            self.assertEqual(saved, [Path(temp) / "Extras" / "Videos" / "Behind the Scenes.mp4"])
+            self.assertEqual(saved, [Path(temp) / "extras" / "Behind the Scenes.mp4"])
 
     def test_opaque_non_png_max_logo_is_rejected(self):
         with tempfile.TemporaryDirectory() as temp:

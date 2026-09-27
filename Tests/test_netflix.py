@@ -162,7 +162,7 @@ class NetflixProviderTests(unittest.TestCase):
             with patch.object(base, "download_binary", side_effect=fake_download):
                 saved = base.save_netflix_series_metadata(meta, {}, explicit_folder=str(source))
             root = Path(temp) / "Example Show (2025)"
-            video = root / "S01" / "S01E01 Example Show - Beginning.mkv"
+            video = root / "Season 01" / "S01E01 Example Show - Beginning.mkv"
             self.assertTrue(video.exists())
             self.assertTrue(video.with_suffix(".nfo").exists())
             self.assertTrue(video.with_name(video.stem + "-thumb.jpg").exists())
@@ -171,7 +171,7 @@ class NetflixProviderTests(unittest.TestCase):
             self.assertTrue((root / "backdrop.jpg").exists())
             self.assertTrue((root / "logo.png").exists())
             self.assertTrue((root / "trailers" / "trailer.mp4").exists())
-            self.assertTrue((root / "Extras" / "Videos" / "Behind the Scenes.mp4").exists())
+            self.assertTrue((root / "extras" / "Behind the Scenes.mp4").exists())
             self.assertTrue(saved)
 
     def test_later_handoff_reuses_existing_series_root_in_netflix_output(self):
@@ -188,7 +188,7 @@ class NetflixProviderTests(unittest.TestCase):
             source.write_bytes(b"video")
             with patch.object(base, "download_binary", return_value=None):
                 base.save_netflix_series_metadata(meta, {}, explicit_folder=str(source))
-            self.assertTrue((existing / "S01" / "S01E01 Example Show - Beginning.mkv").exists())
+            self.assertTrue((existing / "Season 01" / "S01E01 Example Show - Beginning.mkv").exists())
             self.assertEqual((existing / "tvshow.nfo").read_text(encoding="utf-8"), "preserve")
             self.assertFalse((staging / "Example Show (2025)").exists())
 
@@ -218,14 +218,14 @@ class NetflixProviderTests(unittest.TestCase):
                 base.save_netflix_series_metadata(meta, {}, explicit_folder=str(first))
                 show = root / "Example Show (2025)"
                 series_nfo = show / "tvshow.nfo"
-                self.assertTrue((show / "S01" / "S01E01 Example Show - Beginning.mkv").exists())
+                self.assertTrue((show / "Season 01" / "S01E01 Example Show - Beginning.mkv").exists())
                 self.assertTrue(series_nfo.exists())
                 series_nfo.write_text("preserve me", encoding="utf-8")
 
                 second.write_bytes(b"two")
                 base.save_netflix_series_metadata(meta, {}, explicit_folder=str(second))
             show = root / "Example Show (2025)"
-            self.assertTrue((show / "S01" / "S01E02 Example Show - Return.mkv").exists())
+            self.assertTrue((show / "Season 01" / "S01E02 Example Show - Return.mkv").exists())
             self.assertEqual((show / "tvshow.nfo").read_text(encoding="utf-8"), "preserve me")
             self.assertTrue(unrelated.exists())
             self.assertFalse(first.exists()); self.assertFalse(second.exists())
@@ -274,12 +274,12 @@ class NetflixProviderTests(unittest.TestCase):
                 saved = base.save_metadata_bundle(meta, settings)
 
             root = Path(temp) / "Example Show (2025)"
-            episode = root / "S01" / "S01E01 Example Show - Beginning"
+            episode = root / "Season 01" / "S01E01 Example Show - Beginning"
             self.assertTrue((root / "tvshow.nfo").exists())
             self.assertTrue(episode.with_suffix(".nfo").exists())
             self.assertTrue(episode.with_name(episode.name + "-thumb.jpg").exists())
             self.assertTrue((root / "trailers" / "trailer.mp4").exists())
-            self.assertTrue((root / "Extras" / "Videos" / "Behind the Scenes.mp4").exists())
+            self.assertTrue((root / "extras" / "Behind the Scenes.mp4").exists())
             self.assertTrue(saved)
 
     def test_movie_handoff_uses_year_folder_provider_tag_and_native_trailer(self):

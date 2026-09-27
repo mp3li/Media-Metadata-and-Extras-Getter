@@ -255,7 +255,7 @@ class ParamountPlusProviderTests(unittest.TestCase):
             with patch.object(base, "download_binary", side_effect=fake_download):
                 saved = base.save_paramountplus_series_metadata(meta, settings, explicit_folder=str(video))
             root = download / "SpongeBob SquarePants (1999-)"
-            season = root / "S01"
+            season = root / "Season 01"
             stem = "S01E01 SpongeBob SquarePants - Help Wanted"
             self.assertTrue((season / f"{stem}.mp4").exists())
             self.assertTrue((season / f"{stem}.en_us.srt").exists())
@@ -291,7 +291,7 @@ class ParamountPlusProviderTests(unittest.TestCase):
             ):
                 base.save_paramountplus_series_metadata(meta, {}, explicit_folder=temp)
 
-            root = Path(temp) / "SpongeBob SquarePants (1999-)" / "S01"
+            root = Path(temp) / "SpongeBob SquarePants (1999-)" / "Season 01"
             first_stem = "S01E01 SpongeBob SquarePants - Help Wanted"
             second_stem = "S01E02 SpongeBob SquarePants - Reef Blower"
             self.assertTrue((root / f"{first_stem}.mp4").exists())
@@ -325,8 +325,8 @@ class ParamountPlusProviderTests(unittest.TestCase):
                 base.save_paramountplus_series_metadata(meta, {}, explicit_folder=temp)
 
             show = root / "SpongeBob SquarePants (1999-)"
-            self.assertTrue((show / "S01" / "S01E01 SpongeBob SquarePants - Help Wanted.mp4").exists())
-            self.assertTrue((show / "S01" / "S01E02 SpongeBob SquarePants - Reef Blower.mp4").exists())
+            self.assertTrue((show / "Season 01" / "S01E01 SpongeBob SquarePants - Help Wanted.mp4").exists())
+            self.assertTrue((show / "Season 01" / "S01E02 SpongeBob SquarePants - Reef Blower.mp4").exists())
             self.assertFalse(first_source.exists())
             self.assertFalse(second_source.exists())
 
@@ -351,8 +351,8 @@ class ParamountPlusProviderTests(unittest.TestCase):
                 base.save_paramountplus_series_metadata(meta, {}, explicit_folder=str(video))
 
             stem = "S01E01 SpongeBob SquarePants - Help Wanted"
-            self.assertTrue((existing / "S01" / f"{stem}.mp4").is_file())
-            self.assertTrue((existing / "S01" / f"{stem}.en_us.srt").is_file())
+            self.assertTrue((existing / "Season 01" / f"{stem}.mp4").is_file())
+            self.assertTrue((existing / "Season 01" / f"{stem}.en_us.srt").is_file())
             self.assertEqual((existing / "tvshow.nfo").read_text(encoding="utf-8"), "existing")
             self.assertEqual(
                 [path for path in output.iterdir() if path.is_dir() and path.name.startswith("SpongeBob SquarePants (")],
@@ -377,7 +377,7 @@ class ParamountPlusProviderTests(unittest.TestCase):
     def test_broad_root_rejects_unrelated_same_episode_number(self):
         meta = base.metadata_from_provider_dict(self.extract_episode())
         with tempfile.TemporaryDirectory() as temp:
-            unrelated = Path(temp) / "Another Show" / "S01"
+            unrelated = Path(temp) / "Another Show" / "Season 01"
             unrelated.mkdir(parents=True)
             (unrelated / "S01E01 Another Show.mp4").write_bytes(b"video")
             settings = {"media_folders": [temp], "paramountplus_series_metadata_enabled": True}
@@ -388,7 +388,7 @@ class ParamountPlusProviderTests(unittest.TestCase):
         meta = base.metadata_from_provider_dict(self.extract_episode())
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp) / "SpongeBob SquarePants (1999-)"
-            season = root / "S01"
+            season = root / "Season 01"
             season.mkdir(parents=True)
             video = season / "S01E01 SpongeBob SquarePants - Help Wanted.mp4"
             video.write_bytes(b"video")
@@ -415,7 +415,7 @@ class ParamountPlusProviderTests(unittest.TestCase):
         meta.series_end_year = "2026"
         with tempfile.TemporaryDirectory() as temp:
             old_root = Path(temp) / "SpongeBob SquarePants (1999-)"
-            season = old_root / "S01"
+            season = old_root / "Season 01"
             season.mkdir(parents=True)
             video = season / "S01E01 SpongeBob SquarePants - Help Wanted.mp4"
             video.write_bytes(b"video")
@@ -423,7 +423,7 @@ class ParamountPlusProviderTests(unittest.TestCase):
             group = base.ParamountPlusMediaGroup(season, video.stem, 1, 1, [video])
             migrated = base.migrate_paramountplus_series_folder(group, meta)
             new_root = Path(temp) / "SpongeBob SquarePants (1999-2026)"
-            self.assertEqual(migrated.folder, (new_root / "S01").resolve())
+            self.assertEqual(migrated.folder, (new_root / "Season 01").resolve())
             self.assertTrue((new_root / "poster.jpg").exists())
             self.assertFalse(old_root.exists())
 

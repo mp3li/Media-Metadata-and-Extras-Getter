@@ -510,7 +510,13 @@ def clean_final_metadata(meta: Metadata) -> None:
 
 def format_preview(meta: Metadata) -> str:
     jellyfin_named_art = meta.source_site in {
-        crunchyroll.NAME, disneyplus.NAME, hbomax.NAME, paramountplus.NAME, pbs_kids.NAME, amazon.PRIME_NAME
+        netflix.NAME,
+        crunchyroll.NAME,
+        disneyplus.NAME,
+        hbomax.NAME,
+        paramountplus.NAME,
+        pbs_kids.NAME,
+        amazon.PRIME_NAME,
     }
     rows = [
         ("Source Site", meta.source_site),
@@ -716,6 +722,70 @@ def series_title_without_year(folder_name: str) -> str:
     return re.sub(r" \(\d{4}(?:-(?:\d{4})?)?\)$", "", clean_text(folder_name))
 
 
+def season_number_from_folder_name(folder_name: str) -> int | None:
+    match = re.fullmatch(r"(?:season\s*|se?|s)0*(\d{1,4})", clean_text(folder_name), re.IGNORECASE)
+    return int(match.group(1)) if match else None
+
+
+def is_season_folder_name(folder_name: str) -> bool:
+    return season_number_from_folder_name(folder_name) is not None
+
+
+def jellyfin_season_folder_name(season: int) -> str:
+    return f"Season {season:02d}"
+
+
+def jellyfin_season_folder(show_folder: Path, season: int) -> Path:
+    return show_folder / jellyfin_season_folder_name(season)
+
+
+def merge_legacy_media_folder(destination: Path, legacy_folders: list[Path], label: str) -> Path:
+    """Move legacy nested media into one Jellyfin-recognized folder without overwriting."""
+    existing_legacy = [folder for folder in legacy_folders if folder.is_dir()]
+    moves: list[tuple[Path, Path]] = []
+    claimed: set[str] = set()
+    for legacy in existing_legacy:
+        for source in legacy.iterdir():
+            target = destination / source.name
+            target_key = normalize_match_key(str(target))
+            if target.exists() or target_key in claimed:
+                raise FileExistsError(f"{label} migration target already exists: {target}")
+            claimed.add(target_key)
+            moves.append((source, target))
+    if moves:
+        destination.mkdir(parents=True, exist_ok=True)
+        for source, target in moves:
+            shutil.move(str(source), str(target))
+    for legacy in existing_legacy:
+        try:
+            legacy.rmdir()
+        except OSError:
+            pass
+        parent = legacy.parent
+        try:
+            if parent.exists() and not os.path.samefile(parent, destination):
+                parent.rmdir()
+        except OSError:
+            pass
+    return destination
+
+
+def jellyfin_extras_folder(folder: Path) -> Path:
+    return merge_legacy_media_folder(
+        folder / "extras",
+        [folder / "Extras" / "Videos"],
+        "Jellyfin extras",
+    )
+
+
+def jellyfin_trailers_folder(folder: Path) -> Path:
+    return merge_legacy_media_folder(
+        folder / "trailers",
+        [folder / "Extras" / "Trailers"],
+        "Jellyfin trailers",
+    )
+
+
 def matching_series_folders(output_root: Path, title: str, desired_name: str) -> list[Path]:
     """Find an existing series root without allowing a second year-suffixed copy."""
     if not output_root.is_dir():
@@ -793,7 +863,7 @@ def provider_handoff_show_folder(
         return None
     supplied = Path(explicit_folder).expanduser().resolve()
     source = supplied.parent if supplied.is_file() or supplied.suffix.casefold() in VIDEO_EXTENSIONS else supplied
-    if re.fullmatch(r"S\d{1,2}", source.name, re.IGNORECASE):
+    if is_season_folder_name(source.name):
         source = source.parent
 
     title = safe_filename(meta.show_title or meta.title)
@@ -1392,7 +1462,7 @@ def prepare_bbc_media_group(
     organize = bool(settings.get("bbc_series_organize_enabled"))
     if not (rename or organize):
         return group
-    destination = group.folder / f"S{group.season:02d}" if organize else group.folder
+    destination = jellyfin_season_folder(group.folder, group.season) if organize else group.folder
     base = bbc_target_base(meta, group) if rename else group.stem
     targets: list[tuple[Path, Path]] = []
     used: set[Path] = set()
@@ -1593,7 +1663,7 @@ def bbc_queue_target_base(meta: Metadata, group: BBCMediaGroup) -> str:
 
 def bbc_queue_show_folder(folder: Path, meta: Metadata) -> Path:
     resolved = folder.resolve()
-    root = resolved.parent if re.fullmatch(r"S\d{1,2}", resolved.name, re.IGNORECASE) else resolved
+    root = resolved.parent if is_season_folder_name(resolved.name) else resolved
     desired = bbc_queue_series_folder_name(meta)
     if normalize_match_key(root.name) == normalize_match_key(desired):
         return root
@@ -1615,7 +1685,7 @@ def prepare_bbc_queue_media_group(
     if not (rename or organize):
         return group
     destination = (
-        bbc_queue_show_folder(group.folder, meta) / f"S{group.season:02d}"
+        jellyfin_season_folder(bbc_queue_show_folder(group.folder, meta), group.season)
         if organize else group.folder
     )
     base = bbc_queue_target_base(meta, group) if rename else group.stem
@@ -1752,7 +1822,7 @@ def netflix_series_folder_name(meta: Metadata) -> str:
 
 def netflix_show_folder(folder: Path, meta: Metadata) -> Path:
     resolved = folder.resolve()
-    root = resolved.parent if re.fullmatch(r"S\d{1,2}", resolved.name, re.IGNORECASE) else resolved
+    root = resolved.parent if is_season_folder_name(resolved.name) else resolved
     desired = netflix_series_folder_name(meta)
     if normalize_match_key(root.name) == normalize_match_key(desired):
         return root
@@ -1889,7 +1959,7 @@ def save_netflix_extra_videos(meta: Metadata, folder: Path) -> list[Path]:
             candidate = f"{base} ({duplicate})"
             duplicate += 1
         used_names.add(candidate.casefold())
-        target = folder / "Extras" / "Videos" / f"{candidate}{guess_media_extension(url)}"
+        target = jellyfin_extras_folder(folder) / f"{candidate}{guess_media_extension(url)}"
         if target.exists():
             continue
         target.parent.mkdir(parents=True, exist_ok=True)
@@ -1934,7 +2004,7 @@ def save_netflix_series_optional_videos(meta: Metadata, folder: Path) -> list[Pa
     series = netflix_parent_series_meta(meta)
     saved: list[Path] = []
     if series.trailer_url:
-        trailer_dir = folder / "trailers"
+        trailer_dir = jellyfin_trailers_folder(folder)
         trailer_target = trailer_dir / "trailer.mp4"
         if not trailer_target.exists():
             trailer_dir.mkdir(parents=True, exist_ok=True)
@@ -1981,7 +2051,7 @@ def save_netflix_series_metadata(
         else:
             episode_meta = netflix_episode_metadata(series, record)
         show_folder = explicit_show_folder or netflix_show_folder(group.folder, series)
-        destination = show_folder / f"S{group.season:02d}"
+        destination = jellyfin_season_folder(show_folder, group.season)
         base = safe_filename(
             f"S{group.season:02d}E{group.episode:02d} {series.title}"
             + (f" - {episode_meta.episode_title}" if episode_meta.episode_title else "")
@@ -2168,7 +2238,7 @@ def prepare_crunchyroll_media_group(
         return group
     if organize:
         group = migrate_crunchyroll_series_folder(group, meta)
-    season_folder = f"S{group.season:02d}"
+    season_folder = jellyfin_season_folder_name(group.season)
     destination = (
         crunchyroll_show_folder(group.folder, meta) / season_folder
         if organize
@@ -2256,7 +2326,7 @@ def migrate_crunchyroll_series_folder(
 ) -> CrunchyrollMediaGroup:
     """Atomically rename a legacy or stale year-range series root before organizing an episode."""
     folder = group.folder.resolve()
-    root = folder.parent if re.fullmatch(r"S\d{1,2}", folder.name, re.IGNORECASE) else folder
+    root = folder.parent if is_season_folder_name(folder.name) else folder
     title = safe_filename(meta.show_title or meta.title)
     root_title = re.sub(r" \(\d{4}(?:-(?:\d{4})?)?\)$", "", root.name)
     if normalize_match_key(root_title) != normalize_match_key(title):
@@ -2307,7 +2377,7 @@ def crunchyroll_show_folder(folder: Path, meta: Metadata) -> Path:
     resolved_folder = folder.resolve()
     root = (
         resolved_folder.parent
-        if re.fullmatch(r"S\d{1,2}", resolved_folder.name, re.IGNORECASE)
+        if is_season_folder_name(resolved_folder.name)
         else resolved_folder
     )
     show_title = safe_filename(meta.show_title or meta.title)
@@ -2369,7 +2439,7 @@ def ensure_crunchyroll_series_bundle(episode_meta: Metadata, show_folder: Path) 
 
 def save_crunchyroll_series_trailer(meta: Metadata, show_folder: Path) -> list[Path]:
     """Save one series trailer last, preferring any URL supplied directly by Crunchyroll."""
-    trailer_dir = show_folder / "trailers"
+    trailer_dir = jellyfin_trailers_folder(show_folder)
     if trailer_dir.exists() and any(
         path.is_file() and path.suffix.casefold() in VIDEO_EXTENSIONS
         for path in trailer_dir.iterdir()
@@ -2616,7 +2686,7 @@ def disneyplus_series_folder_name(meta: Metadata) -> str:
 
 def disneyplus_show_folder(folder: Path, meta: Metadata) -> Path:
     resolved = folder.resolve()
-    root = resolved.parent if re.fullmatch(r"S\d{1,2}", resolved.name, re.I) else resolved
+    root = resolved.parent if is_season_folder_name(resolved.name) else resolved
     desired_name = disneyplus_series_folder_name(meta)
     if normalize_match_key(root.name) == normalize_match_key(desired_name):
         return root
@@ -2628,7 +2698,7 @@ def disneyplus_show_folder(folder: Path, meta: Metadata) -> Path:
 
 def migrate_disneyplus_series_folder(group: DisneyPlusMediaGroup, meta: Metadata) -> DisneyPlusMediaGroup:
     folder = group.folder.resolve()
-    root = folder.parent if re.fullmatch(r"S\d{1,2}", folder.name, re.I) else folder
+    root = folder.parent if is_season_folder_name(folder.name) else folder
     title = safe_filename(meta.show_title or meta.title)
     root_title = re.sub(r" \(\d{4}(?:-(?:\d{4})?)?\)$", "", root.name)
     if normalize_match_key(root_title) != normalize_match_key(title):
@@ -2660,7 +2730,7 @@ def prepare_disneyplus_media_group(
     if organize:
         group = migrate_disneyplus_series_folder(group, meta)
     destination = (
-        disneyplus_show_folder(group.folder, meta) / f"S{group.season:02d}"
+        jellyfin_season_folder(disneyplus_show_folder(group.folder, meta), group.season)
         if organize else group.folder
     )
     base = disneyplus_target_base(meta, group) if rename else group.stem
@@ -2761,7 +2831,7 @@ def ensure_disneyplus_series_bundle(meta: Metadata, show_folder: Path) -> list[P
 
 
 def save_disneyplus_series_trailer(meta: Metadata, show_folder: Path) -> list[Path]:
-    trailer_dir = show_folder / "trailers"
+    trailer_dir = jellyfin_trailers_folder(show_folder)
     if trailer_dir.exists() and any(path.is_file() and path.suffix.casefold() in VIDEO_EXTENSIONS for path in trailer_dir.iterdir()):
         return []
     if not clean_text(meta.trailer_url):
@@ -2909,7 +2979,7 @@ def hbomax_target_base(meta: Metadata, group: HBOMaxMediaGroup | None = None) ->
 
 def hbomax_show_folder(folder: Path, meta: Metadata) -> Path:
     resolved = folder.resolve()
-    root = resolved.parent if re.fullmatch(r"S\d{1,2}", resolved.name, re.I) else resolved
+    root = resolved.parent if is_season_folder_name(resolved.name) else resolved
     desired = hbomax_series_folder_name(meta)
     if normalize_match_key(root.name) == normalize_match_key(desired):
         return root
@@ -2931,7 +3001,7 @@ def prepare_hbomax_media_group(
     if not (rename or organize):
         return group
     destination = (
-        hbomax_show_folder(group.folder, meta) / f"S{group.season:02d}"
+        jellyfin_season_folder(hbomax_show_folder(group.folder, meta), group.season)
         if organize else group.folder
     )
     base = hbomax_target_base(meta, group) if rename else group.stem
@@ -3211,7 +3281,7 @@ def hbomax_capture_public_preview(page_url: str) -> str:
 
 
 def save_hbomax_trailer(meta: Metadata, folder: Path) -> list[Path]:
-    trailer_dir = folder / "trailers"
+    trailer_dir = jellyfin_trailers_folder(folder)
     if trailer_dir.exists() and any(path.is_file() and path.suffix.casefold() in VIDEO_EXTENSIONS for path in trailer_dir.iterdir()):
         return []
     page_url = clean_text(meta.trailer_url) or clean_text(meta.detail_link) or clean_text(meta.source_url)
@@ -3251,7 +3321,7 @@ def save_hbomax_extra_videos(meta: Metadata, folder: Path) -> list[Path]:
             candidate = f"{base} ({duplicate})"
             duplicate += 1
         used_names.add(candidate.casefold())
-        extra_dir = folder / "Extras" / "Videos"
+        extra_dir = jellyfin_extras_folder(folder)
         extra_dir.mkdir(parents=True, exist_ok=True)
         path = download_binary(direct, extra_dir / f"{candidate}.mp4")
         if path:
@@ -3418,7 +3488,7 @@ def amazon_prime_target_base(meta: Metadata, group: AmazonPrimeMediaGroup | None
 
 def amazon_prime_show_folder(folder: Path, meta: Metadata) -> Path:
     resolved = folder.resolve()
-    root = resolved.parent if re.fullmatch(r"S\d{1,2}", resolved.name, re.I) else resolved
+    root = resolved.parent if is_season_folder_name(resolved.name) else resolved
     title = safe_filename(meta.show_title or meta.title)
     desired = amazon_prime_series_folder_name(meta)
     if normalize_match_key(root.name) == normalize_match_key(desired):
@@ -3431,7 +3501,7 @@ def amazon_prime_show_folder(folder: Path, meta: Metadata) -> Path:
 
 def migrate_amazon_prime_series_folder(group: AmazonPrimeMediaGroup, meta: Metadata) -> AmazonPrimeMediaGroup:
     folder = group.folder.resolve()
-    root = folder.parent if re.fullmatch(r"S\d{1,2}", folder.name, re.I) else folder
+    root = folder.parent if is_season_folder_name(folder.name) else folder
     title = safe_filename(meta.show_title or meta.title)
     root_title = re.sub(r" \(\d{4}(?:-(?:\d{4})?)?\)$", "", root.name)
     if normalize_match_key(root_title) != normalize_match_key(title):
@@ -3463,7 +3533,7 @@ def prepare_amazon_prime_media_group(
     if organize:
         group = migrate_amazon_prime_series_folder(group, meta)
     destination = (
-        amazon_prime_show_folder(group.folder, meta) / f"S{group.season:02d}"
+        jellyfin_season_folder(amazon_prime_show_folder(group.folder, meta), group.season)
         if organize else group.folder
     )
     base = amazon_prime_target_base(meta, group) if rename else group.stem
@@ -3730,7 +3800,7 @@ class AmazonPrimeDevToolsWebSocket:
 
 
 def save_amazon_prime_series_trailer(meta: Metadata, show_folder: Path) -> list[Path]:
-    trailer_dir = show_folder / "trailers"
+    trailer_dir = jellyfin_trailers_folder(show_folder)
     if trailer_dir.exists() and any(path.is_file() and path.suffix.casefold() in VIDEO_EXTENSIONS for path in trailer_dir.iterdir()):
         return []
     page_url = clean_text(meta.trailer_url)
@@ -3950,7 +4020,7 @@ def pbs_kids_series_folder_name(meta: Metadata) -> str:
 
 def pbs_kids_show_folder(folder: Path, meta: Metadata) -> Path:
     resolved = folder.resolve()
-    root = resolved.parent if re.fullmatch(r"S\d{1,2}", resolved.name, re.I) else resolved
+    root = resolved.parent if is_season_folder_name(resolved.name) else resolved
     desired = pbs_kids_series_folder_name(meta)
     if normalize_match_key(root.name) == normalize_match_key(desired):
         return root
@@ -3968,7 +4038,7 @@ def prepare_pbs_kids_media_group(
     if not (rename or organize):
         return group
     destination = (
-        pbs_kids_show_folder(group.folder, meta) / f"S{group.season:02d}"
+        jellyfin_season_folder(pbs_kids_show_folder(group.folder, meta), group.season)
         if organize else group.folder
     )
     base = pbs_kids_target_base(meta, group) if rename else group.stem
@@ -4286,7 +4356,7 @@ def paramountplus_series_folder_name(meta: Metadata) -> str:
 
 def paramountplus_show_folder(folder: Path, meta: Metadata) -> Path:
     resolved = folder.resolve()
-    root = resolved.parent if re.fullmatch(r"S\d{1,2}", resolved.name, re.IGNORECASE) else resolved
+    root = resolved.parent if is_season_folder_name(resolved.name) else resolved
     desired_name = paramountplus_series_folder_name(meta)
     if normalize_match_key(root.name) == normalize_match_key(desired_name):
         return root
@@ -4309,7 +4379,7 @@ def migrate_paramountplus_series_folder(
     group: ParamountPlusMediaGroup, meta: Metadata
 ) -> ParamountPlusMediaGroup:
     folder = group.folder.resolve()
-    root = folder.parent if re.fullmatch(r"S\d{1,2}", folder.name, re.IGNORECASE) else folder
+    root = folder.parent if is_season_folder_name(folder.name) else folder
     title = safe_filename(meta.show_title or meta.title)
     root_title = re.sub(r" \(\d{4}(?:-(?:\d{4})?)?\)$", "", root.name)
     if normalize_match_key(root_title) != normalize_match_key(title):
@@ -4345,7 +4415,10 @@ def prepare_paramountplus_media_group(
     if organize and explicit_show_folder is None:
         group = migrate_paramountplus_series_folder(group, meta)
     destination = (
-        (explicit_show_folder or paramountplus_show_folder(group.folder, meta)) / f"S{group.season:02d}"
+        jellyfin_season_folder(
+            explicit_show_folder or paramountplus_show_folder(group.folder, meta),
+            group.season,
+        )
         if organize else group.folder
     )
     base = paramountplus_target_base(meta, group) if rename else group.stem
@@ -4494,7 +4567,7 @@ def ensure_paramountplus_series_bundle(meta: Metadata, show_folder: Path) -> lis
 
 def save_paramountplus_series_trailer(meta: Metadata, show_folder: Path) -> list[Path]:
     """Save one provider-supplied public preview in Jellyfin's native trailer folder."""
-    trailer_dir = show_folder / "trailers"
+    trailer_dir = jellyfin_trailers_folder(show_folder)
     if trailer_dir.exists() and any(
         path.is_file() and path.suffix.casefold() in VIDEO_EXTENSIONS for path in trailer_dir.iterdir()
     ):
@@ -4527,7 +4600,7 @@ def save_paramountplus_extra_videos(meta: Metadata, folder: Path) -> list[Path]:
             name = f"{base} ({duplicate})"
             duplicate += 1
         used_names.add(name.casefold())
-        extra_dir = folder / "Extras" / "Videos"
+        extra_dir = jellyfin_extras_folder(folder)
         extra_dir.mkdir(parents=True, exist_ok=True)
         target = extra_dir / f"{name}{guess_media_extension(url)}"
         path = download_binary(url, target)
@@ -4759,9 +4832,10 @@ def output_plan(
             + (f" - {meta.episode_title}" if meta.episode_title else "")
         )
         return (
-            settings_output_dir(settings)
-            / netflix_series_folder_name(meta)
-            / f"S{int(meta.season_number):02d}",
+            jellyfin_season_folder(
+                settings_output_dir(settings) / netflix_series_folder_name(meta),
+                int(meta.season_number),
+            ),
             base,
         )
     if meta.source_site == amazon.PRIME_NAME and meta.media_kind.casefold() == "series":
@@ -4774,9 +4848,10 @@ def output_plan(
     ):
         base = amazon_prime_target_base(meta)
         return (
-            settings_output_dir(settings)
-            / amazon_prime_series_folder_name(meta)
-            / f"S{int(meta.season_number):02d}",
+            jellyfin_season_folder(
+                settings_output_dir(settings) / amazon_prime_series_folder_name(meta),
+                int(meta.season_number),
+            ),
             base,
         )
     if meta.source_site == disneyplus.NAME and meta.media_kind.casefold() == "series":
@@ -4789,9 +4864,10 @@ def output_plan(
     ):
         base = disneyplus_target_base(meta)
         return (
-            settings_output_dir(settings)
-            / disneyplus_series_folder_name(meta)
-            / f"S{int(meta.season_number):02d}",
+            jellyfin_season_folder(
+                settings_output_dir(settings) / disneyplus_series_folder_name(meta),
+                int(meta.season_number),
+            ),
             base,
         )
     if meta.source_site == hbomax.NAME and meta.media_kind.casefold() == "series":
@@ -4804,7 +4880,10 @@ def output_plan(
     ):
         base = hbomax_target_base(meta)
         return (
-            settings_output_dir(settings) / hbomax_series_folder_name(meta) / f"S{int(meta.season_number):02d}",
+            jellyfin_season_folder(
+                settings_output_dir(settings) / hbomax_series_folder_name(meta),
+                int(meta.season_number),
+            ),
             base,
         )
     if meta.source_site == pbs_kids.NAME and meta.media_kind.casefold() == "series":
@@ -4817,9 +4896,10 @@ def output_plan(
     ):
         base = pbs_kids_target_base(meta)
         return (
-            settings_output_dir(settings)
-            / pbs_kids_series_folder_name(meta)
-            / f"S{int(meta.season_number):02d}",
+            jellyfin_season_folder(
+                settings_output_dir(settings) / pbs_kids_series_folder_name(meta),
+                int(meta.season_number),
+            ),
             base,
         )
     if meta.source_site == paramountplus.NAME and meta.media_kind.casefold() == "series":
@@ -4832,9 +4912,10 @@ def output_plan(
     ):
         base = paramountplus_target_base(meta)
         return (
-            settings_output_dir(settings)
-            / paramountplus_series_folder_name(meta)
-            / f"S{int(meta.season_number):02d}",
+            jellyfin_season_folder(
+                settings_output_dir(settings) / paramountplus_series_folder_name(meta),
+                int(meta.season_number),
+            ),
             base,
         )
     if meta.source_site == crunchyroll.NAME and meta.media_kind.casefold() == "series":
@@ -4847,9 +4928,10 @@ def output_plan(
     ):
         base = crunchyroll_target_base(meta)
         return (
-            settings_output_dir(settings)
-            / crunchyroll_series_folder_name(meta)
-            / f"S{int(meta.season_number):02d}",
+            jellyfin_season_folder(
+                settings_output_dir(settings) / crunchyroll_series_folder_name(meta),
+                int(meta.season_number),
+            ),
             base,
         )
     folder = settings_output_dir(settings) / default_folder_name(meta)
@@ -4926,7 +5008,7 @@ def save_metadata_bundle(meta: Metadata, settings: dict[str, Any], explicit_fold
         trailer_meta = amazon_prime_parent_series_meta(meta)
         saved.extend(save_amazon_prime_series_trailer(trailer_meta, amazon_prime_series_folder))
     if is_netflix_movie(meta) and meta.trailer_url:
-        trailer_dir = folder / "trailers"
+        trailer_dir = jellyfin_trailers_folder(folder)
         trailer_dir.mkdir(parents=True, exist_ok=True)
         trailer_target = trailer_dir / "trailer.mp4"
         if not trailer_target.exists():
@@ -5008,7 +5090,7 @@ def save_metadata_bundle_to_location(
         and meta.media_kind.casefold() in {"series", "episode"}
     ):
         show_folder = folder
-        if meta.media_kind.casefold() == "episode" and re.fullmatch(r"S\d{2}", folder.name, re.IGNORECASE):
+        if meta.media_kind.casefold() == "episode" and is_season_folder_name(folder.name):
             show_folder = folder.parent
         if meta.source_site == crunchyroll.NAME:
             saved.extend(save_crunchyroll_show_art(meta, show_folder))
@@ -5087,16 +5169,14 @@ def save_metadata_bundle_to_location(
                 saved.append(path)
 
     if meta.trailer_url and meta.source_site != amazon.PRIME_NAME:
-        trailer_dir = folder / (
-            "trailers" if meta.source_site in {disneyplus.NAME, paramountplus.NAME} else "Extras/Trailers"
-        )
+        trailer_dir = jellyfin_trailers_folder(folder)
         trailer_dir.mkdir(parents=True, exist_ok=True)
         trailer = download_binary(meta.trailer_url, trailer_dir / "trailer.mp4")
         if trailer:
             saved.append(trailer)
 
     if meta.extra_videos:
-        extra_dir = folder / "Extras" / "Videos"
+        extra_dir = jellyfin_extras_folder(folder)
         extra_dir.mkdir(parents=True, exist_ok=True)
         for index, video in enumerate(meta.extra_videos, start=1):
             if not clean_text(video.url):
@@ -5688,7 +5768,7 @@ def save_unshackle_extra_videos(meta: Metadata, folder: Path, title_base: str) -
             candidate = f"{name} ({duplicate})"
             duplicate += 1
         used.add(candidate.casefold())
-        extra_dir = folder / "Extras" / "Videos"
+        extra_dir = jellyfin_extras_folder(folder)
         target = extra_dir / f"{candidate}{guess_media_extension(direct)}"
         if target.exists():
             continue

@@ -170,7 +170,7 @@ class DisneyPlusProviderTests(unittest.TestCase):
             with patch.object(base, "download_binary", side_effect=save_asset):
                 saved = base.save_disneyplus_series_metadata(meta, settings, explicit_folder=str(video))
             root = download / "Bluey Tunes (2026)"
-            season = root / "S01"
+            season = root / "Season 01"
             stem = "S01E01 Bluey Tunes - Taxi"
             self.assertTrue((season / f"{stem}.mp4").exists())
             self.assertTrue((season / f"{stem}.en_us.srt").exists())
@@ -187,7 +187,7 @@ class DisneyPlusProviderTests(unittest.TestCase):
     def test_broad_root_rejects_unrelated_same_episode_number(self):
         meta = base.metadata_from_provider_dict(self.extract(EPISODE_URL))
         with tempfile.TemporaryDirectory() as temp:
-            unrelated = Path(temp) / "Another Show" / "S01"
+            unrelated = Path(temp) / "Another Show" / "Season 01"
             unrelated.mkdir(parents=True)
             (unrelated / "S01E01 Another Show.mp4").write_bytes(b"video")
             self.assertEqual(base.disneyplus_media_groups(meta, {"media_folders": [temp]}), [])
@@ -196,7 +196,7 @@ class DisneyPlusProviderTests(unittest.TestCase):
         meta = base.metadata_from_provider_dict(self.extract(EPISODE_URL))
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp) / "Bluey Tunes (2026)"
-            season = root / "S01"
+            season = root / "Season 01"
             season.mkdir(parents=True)
             video = season / "S01E01 Bluey Tunes - Taxi.mp4"
             video.write_bytes(b"video")

@@ -52,7 +52,7 @@ class QueueModeContractTests(unittest.TestCase):
                     video.write_bytes(b"video"); nfo.write_text("nfo", encoding="utf-8"); thumb.write_bytes(b"thumb")
                     group = group_type(root, stem, index, 1, [video, nfo, thumb])
                     prepared = prepare(meta, group, {})
-                    self.assertEqual(prepared.folder, canonical / f"S{index:02d}")
+                    self.assertEqual(prepared.folder, canonical / f"Season {index:02d}")
                     self.assertTrue(any(path.name.endswith("-thumb.jpg") for path in prepared.files))
                     self.assertTrue(any(path.suffix == ".nfo" for path in prepared.files))
                     self.assertTrue(unrelated.exists())
@@ -228,7 +228,7 @@ class QueueModeContractTests(unittest.TestCase):
                 }],
             )
             show = root / base.netflix_series_folder_name(netflix_meta)
-            season = show / "S01"
+            season = show / "Season 01"
             season.mkdir(parents=True)
             existing = season / "S01E01 Example Show - Pilot.mkv"
             existing.write_bytes(b"netflix existing")
@@ -333,7 +333,7 @@ class QueueModeContractTests(unittest.TestCase):
         for provider, matcher in cases:
             with self.subTest(provider=provider), tempfile.TemporaryDirectory() as temp:
                 root = Path(temp)
-                unrelated = root / "Another Show (2020)" / "S01"
+                unrelated = root / "Another Show (2020)" / "Season 01"
                 incoming = root / "queue-job"
                 unrelated.mkdir(parents=True); incoming.mkdir()
                 wrong = unrelated / "S01E01 Another Show - Pilot.mkv"
@@ -347,6 +347,49 @@ class QueueModeContractTests(unittest.TestCase):
                 groups = matcher(meta, {}, explicit_folder=temp)
                 self.assertEqual([(group.season, group.episode) for group, _record in groups], [(1, 2)])
                 self.assertTrue(wrong.exists())
+
+    def test_canonical_and_legacy_season_folder_names_are_recognized(self):
+        self.assertEqual(base.jellyfin_season_folder_name(1), "Season 01")
+        self.assertEqual(base.season_number_from_folder_name("Season 01"), 1)
+        self.assertEqual(base.season_number_from_folder_name("S01"), 1)
+        self.assertEqual(base.season_number_from_folder_name("season 7"), 7)
+        self.assertFalse(base.is_season_folder_name("Series 01"))
+
+    def test_legacy_nested_extras_and_trailers_are_migrated_without_overwrite(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            legacy_extra = root / "Extras" / "Videos" / "Featurette.mp4"
+            legacy_trailer = root / "Extras" / "Trailers" / "trailer.mp4"
+            legacy_extra.parent.mkdir(parents=True)
+            legacy_trailer.parent.mkdir(parents=True)
+            legacy_extra.write_bytes(b"extra")
+            legacy_trailer.write_bytes(b"trailer")
+
+            extra_folder = base.jellyfin_extras_folder(root)
+            trailer_folder = base.jellyfin_trailers_folder(root)
+
+            self.assertEqual(extra_folder, root / "extras")
+            self.assertEqual(trailer_folder, root / "trailers")
+            self.assertEqual((extra_folder / "Featurette.mp4").read_bytes(), b"extra")
+            self.assertEqual((trailer_folder / "trailer.mp4").read_bytes(), b"trailer")
+            self.assertFalse((root / "Extras" / "Videos").exists())
+            self.assertFalse((root / "Extras" / "Trailers").exists())
+
+    def test_legacy_extra_collision_is_refused_before_any_move(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            canonical = root / "extras" / "Featurette.mp4"
+            legacy = root / "Extras" / "Videos" / "Featurette.mp4"
+            canonical.parent.mkdir(parents=True)
+            legacy.parent.mkdir(parents=True)
+            canonical.write_bytes(b"canonical")
+            legacy.write_bytes(b"legacy")
+
+            with self.assertRaises(FileExistsError):
+                base.jellyfin_extras_folder(root)
+
+            self.assertEqual(canonical.read_bytes(), b"canonical")
+            self.assertEqual(legacy.read_bytes(), b"legacy")
 
 
 if __name__ == "__main__":
