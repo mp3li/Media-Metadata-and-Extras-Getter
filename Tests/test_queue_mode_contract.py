@@ -35,6 +35,7 @@ class QueueModeContractTests(unittest.TestCase):
             ("Amazon Prime Video", base.amazon_prime_series_folder_name, {"Amazon Prime Video"}),
             ("PBS KIDS", base.pbs_kids_series_folder_name, {"PBS KIDS"}),
             ("Paramount+", base.paramountplus_series_folder_name, {"ParamountPlus"}),
+            ("Tubi", base.tubi_series_folder_name, {"Tubi"}),
         ]
         for provider, folder_name, provider_names in cases:
             with self.subTest(provider=provider), tempfile.TemporaryDirectory() as temp:
@@ -136,6 +137,7 @@ class QueueModeContractTests(unittest.TestCase):
             ("Amazon Prime Video", base.AmazonPrimeMediaGroup, base.prepare_amazon_prime_media_group, base.amazon_prime_series_folder_name),
             ("PBS KIDS", base.PBSKidsMediaGroup, base.prepare_pbs_kids_media_group, base.pbs_kids_series_folder_name),
             ("Paramount+", base.ParamountPlusMediaGroup, base.prepare_paramountplus_media_group, base.paramountplus_series_folder_name),
+            ("Tubi", base.TubiMediaGroup, base.prepare_tubi_media_group, base.tubi_series_folder_name),
         ]
         for provider, group_type, prepare, folder_name in cases:
             with self.subTest(provider=provider), tempfile.TemporaryDirectory() as temp:
@@ -171,6 +173,7 @@ class QueueModeContractTests(unittest.TestCase):
             ("Amazon Prime Video", base.AmazonPrimeMediaGroup, base.prepare_amazon_prime_media_group, base.amazon_prime_series_folder_name),
             ("PBS KIDS", base.PBSKidsMediaGroup, base.prepare_pbs_kids_media_group, base.pbs_kids_series_folder_name),
             ("Paramount+", base.ParamountPlusMediaGroup, base.prepare_paramountplus_media_group, base.paramountplus_series_folder_name),
+            ("Tubi", base.TubiMediaGroup, base.prepare_tubi_media_group, base.tubi_series_folder_name),
         ]
         for provider, group_type, prepare, folder_name in cases:
             with self.subTest(provider=provider), tempfile.TemporaryDirectory() as temp:

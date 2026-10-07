@@ -6,6 +6,7 @@ All notable project changes are documented here. Published entries are derived f
 
 ### Added
 
+- Tubi movie, series, and episode metadata using Tubi's anonymous public metadata service, with complete provider-confirmed multi-season discovery, exact episode-ID handoff matching, Jellyfin series roots and season folders, NFO/artwork bundles, subtitle-sidecar preservation, collision refusal, and fail-closed catalog validation.
 - A shared per-download MediaFab handoff contract across Crunchyroll, Disney+, HBO Max, Paramount+, Amazon Prime Video, PBS KIDS, BBC iPlayer, and safely exposed Netflix series catalogs: one exact completed video per invocation, provider-ID-first matching, immediate organization, reusable year-qualified series roots, local-only episode output, sidecar preservation, and collision refusal.
 - Cross-provider contract tests covering two independent exact-file handoffs reusing one series root, preserving existing series metadata, leaving unrelated files untouched, and provider identity taking priority over stale season/episode filename text.
 - BBC iPlayer complete multi-slice catalog assembly, series-root `tvshow.nfo` and artwork, episode PID-first Queue Mode matching, and fail-closed behavior when an advertised slice cannot be loaded.
@@ -52,6 +53,8 @@ All notable project changes are documented here. Published entries are derived f
 - Disney+ portrait poster composition, backdrop, transparent logo, reconstructed 1920-wide episode thumbnails, accessibility/creator fields, and the exact `Disney+ Provider` tag.
 
 ### Changed
+
+- HBO Max series ranges now use provider-backed episode availability years when premiere dates are absent, and an open-ended `Start Year-` range now requires an explicit active/returning provider status instead of treating missing status as ongoing.
 
 - Restored Crunchyroll, Paramount+, PBS KIDS, and Disney+'s pre-normalization per-download behavior as the provider standard, removed shared queue-root routing from exact-file handoffs, and applied the same immediate exact-file behavior to Max, Prime Video, BBC iPlayer, and Netflix.
 - Paramount+ exact-file handoffs now distinguish a downloader-created title/season/quality staging wrapper from the selected provider output root, reuse the one existing title-matched series folder there, promote a previously nested series root back to the provider output, and refuse ambiguous roots instead of creating duplicates.

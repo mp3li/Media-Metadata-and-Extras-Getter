@@ -77,7 +77,7 @@ def show_record(selected: int | None) -> dict:
         "summary": {"short": "Short series", "full": "Full series description"},
         "releaseYear": "2019", "numberOfSeasons": 3, "numberOfEpisodes": 4,
         "genres": ["Drama"], "primaryGenre": "Drama", "secondaryGenre": "",
-        "brand": ["HBOTV"], "status": "published",
+        "brand": ["HBOTV"], "status": "published", "seriesStatus": "returning",
         "localizedRating": {"rating_authority": "us-fcc-tv", "classifier": "TV-MA", "descriptors": ["L", "S", "V"]},
         "credits": {"starring": "Zendaya", "directors": "Sam Levinson", "writers": "Sam Levinson", "producers": "Producer", "creators": "Sam Levinson", "sources": ""},
         "images": {"poster-with-logo": "https://img.example/poster.jpg", "cover-artwork": "https://img.example/square.jpg", "default-wide": "https://img.example/banner.jpg", "centered-background": "https://img.example/unused.jpg", "cover-artwork-horizontal": "https://img.example/backdrop.jpg", "content-logo-polychromatic": "https://img.example/logo.png"},
@@ -184,6 +184,22 @@ class HBOMaxTests(unittest.TestCase):
         self.assertEqual((episode_item["date"], episode_item["year"], episode_item["runtime_minutes"]), ("2019-06-16", "2019", "58"))
         self.assertEqual(episode_item["extra_fields"]["Audio"], ["English - Original"])
         self.assertEqual(episode_item["extra_fields"]["Subtitles"], ["English - CC"])
+
+    def test_missing_status_uses_availability_year_without_claiming_series_is_current(self):
+        item = show_record(selected=None)
+        item.pop("seriesStatus")
+        item["title"] = {"short": "And Just Like That...", "full": "And Just Like That..."}
+        item["releaseYear"] = "2021"
+        for season in item["seasons"]:
+            for record in season["episodes"]:
+                record["offeringDates"]["startDate"] = "2025-08-15T01:00:00Z"
+
+        series = hbomax.series_metadata(item, SHOW)
+        meta = base.metadata_from_provider_dict(series)
+
+        self.assertEqual(series["series_end_year"], "2025")
+        self.assertFalse(series["series_is_current"])
+        self.assertEqual(base.hbomax_series_folder_name(meta), "And Just Like That (2021-2025)")
 
     def test_uuid_matching_outranks_stale_filename_position(self):
         meta = base.metadata_from_provider_dict(self.extract(SHOW))

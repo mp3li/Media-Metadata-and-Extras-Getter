@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
 from __future__ import annotations
 
-import datetime as dt
 import html
 import json
 import re
@@ -221,18 +220,23 @@ def series_metadata(item: dict[str, Any], source_url: str) -> dict[str, Any]:
     trailer = trailer_fields(fields, item)
     start_year = clean_text(item.get("releaseYear"))
     dated_years = [record["year"] for record in records if record["year"].isdigit()]
-    end_year = max(dated_years, default=start_year)
+    availability_years = [
+        clean_text(record.get("availability_start"))[:4]
+        for record in records
+        if clean_text(record.get("availability_start"))[:4].isdigit()
+    ]
+    catalog_years = dated_years or availability_years
+    end_year = max(catalog_years, default=start_year)
     status = clean_text(item.get("seriesStatus") or item.get("productionStatus")).casefold()
     if status in {"ended", "completed", "cancelled", "canceled"}:
         current = False
     elif status in {"returning", "returning series", "continuing", "active", "in production"}:
         current = True
-    elif dated_years:
-        current = int(end_year) >= dt.date.today().year
     else:
-        # Max exposes no reliable end-state on many public catalog records. Keep
-        # the range open rather than falsely declaring a completion year.
-        current = True
+        # An open-ended Jellyfin range is a positive claim that the show is
+        # still active. Max often omits a dependable status, so do not infer
+        # that claim merely from a recent episode or a missing premiere date.
+        current = False
     return {
         "source_url": source_url, "source_site": NAME, "media_kind": "series",
         "title": title, "show_title": title,

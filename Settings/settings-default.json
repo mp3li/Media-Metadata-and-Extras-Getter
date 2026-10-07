@@ -24,5 +24,8 @@
   "paramountplus_series_organize_enabled": true,
   "crunchyroll_series_metadata_enabled": true,
   "crunchyroll_series_rename_enabled": true,
-  "crunchyroll_series_organize_enabled": true
+  "crunchyroll_series_organize_enabled": true,
+  "tubi_series_metadata_enabled": true,
+  "tubi_series_rename_enabled": true,
+  "tubi_series_organize_enabled": true
 }

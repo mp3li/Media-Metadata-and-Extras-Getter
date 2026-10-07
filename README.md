@@ -11,7 +11,7 @@
   <img alt="Downloads" src="https://img.shields.io/badge/Downloads-Artwork%2C_Trailers_%26_Metadata-660000?style=flat-square&labelColor=04040c" />
   <img alt="Bulk Processing" src="https://img.shields.io/badge/Bulk_Processing-Optional-660000?style=flat-square&labelColor=04040c" />
   <img alt="Platform" src="https://img.shields.io/badge/Platform-macOS-660000?style=flat-square&labelColor=04040c" />
-  <img alt="Providers" src="https://img.shields.io/badge/Providers-Amazon%2C_Netflix%2C_Disney%2B%2C_HBO_Max%2C_BBC%2C_Paramount%2B%2C_Crunchyroll_%26_PBS_KIDS-660000?style=flat-square&labelColor=04040c" />
+  <img alt="Providers" src="https://img.shields.io/badge/Providers-Amazon%2C_Netflix%2C_Disney%2B%2C_HBO_Max%2C_BBC%2C_Paramount%2B%2C_Crunchyroll%2C_PBS_KIDS_%26_Tubi-660000?style=flat-square&labelColor=04040c" />
 </p>
 
 ## Table of Contents
@@ -28,6 +28,7 @@
 - [Provider Coverage](#provider-coverage)
 - [Requirements](#requirements)
 - [How to Run](#how-to-run)
+- [Automation Interfaces](#automation-interfaces)
 - [How to Use the Tool](#how-to-use-the-tool)
 - [Importing mylinks.txt](#importing-mylinkstxt)
 - [Settings](#settings)
@@ -39,6 +40,7 @@
 - [Paramount+ Series Mode](#paramount-series-mode)
 - [Crunchyroll Series Mode](#crunchyroll-series-mode)
 - [PBS KIDS Series Mode](#pbs-kids-series-mode)
+- [Tubi Series Mode](#tubi-series-mode)
 - [Media Matching](#media-matching)
 - [Output Structure and Naming](#output-structure-and-naming)
 - [Metadata Written to the NFO](#metadata-written-to-the-nfo)
@@ -56,7 +58,7 @@ Media Metadata and Extras Getter is a macOS Python tool that collects public met
 
 For a version of this tool specifically made for live performances, including Amazon Prime Video, OperaVision, Metropolitan Opera, BroadwayHD, MarqueeTV, PBS Great Performances, Disney+, and Netflix, check out [Live Performance Metadata and Extras Getter](https://github.com/mp3li/Live-Performance-Metadata-and-Extras-Getter).
 
-Media Metadata and Extras Getter gathers information that supported public detail pages expose and saves it as a local metadata bundle: an NFO file plus available artwork, trailers, gallery images, and extra videos. It currently supports public detail pages from Amazon Prime Video, Netflix, Disney+, HBO Max, BBC iPlayer, Paramount+, Crunchyroll, and PBS KIDS.
+Media Metadata and Extras Getter gathers information that supported public detail pages expose and saves it as a local metadata bundle: an NFO file plus available artwork, trailers, gallery images, and extra videos. It currently supports public detail pages from Amazon Prime Video, Netflix, Disney+, HBO Max, BBC iPlayer, Paramount+, Crunchyroll, PBS KIDS, and Tubi.
 
 The filenames and folder layout are designed to work especially well with Jellyfin's local-metadata conventions. The output is not locked to Jellyfin, though: the files stay local, use a standard XML NFO structure, and can also support your own organized media folders or other software that reads local NFO files and artwork.
 
@@ -97,6 +99,7 @@ The current provider scripts support these public detail-page links:
 - Paramount+ show, season, episode, movie, and public clip pages
 - Crunchyroll series and episode/watch pages
 - PBS KIDS series, full-episode playlist, and episode watch pages
+- Tubi movie, series, and TV-show episode pages
 
 Unsupported providers do not fall back to generic scraping. The tool prints:
 
@@ -127,7 +130,7 @@ The stable handoff interface is:
 --handoff --detail-link <provider-page> --media-folder <exact-completed-file> --skip-existing
 ```
 
-The identity MediaFab should preserve is provider-specific: Crunchyroll watch ID, Disney+ play UUID, Max episode UUID, Paramount+ episode ID, Prime Video compact ID/GTI/ASIN, PBS KIDS video or legacy media ID, BBC programme PID, or Netflix title/episode ID. A Netflix episode `/watch/...` link resolves its parent show and exact public season/episode record for the per-download handoff. A series-wide manual scan still deliberately skips organization when Netflix exposes only a partial catalog.
+The identity MediaFab should preserve is provider-specific: Crunchyroll watch ID, Disney+ play UUID, Max episode UUID, Paramount+ episode ID, Prime Video compact ID/GTI/ASIN, PBS KIDS video or legacy media ID, BBC programme PID, Netflix title/episode ID, or Tubi content ID. A Netflix episode `/watch/...` link resolves its parent show and exact public season/episode record for the per-download handoff. A series-wide manual scan still deliberately skips organization when Netflix exposes only a partial catalog.
 
 ## Provider Coverage
 
@@ -228,6 +231,16 @@ Coverage depends on what the provider exposes in the public page data for each i
 - after a successful handoff, proven-empty MediaFab timestamp folders containing nothing except `.DS_Store` are removed; folders with any other content and ordinary user-created empty folders are preserved
 - PBS KIDS video is not downloaded. This provider retrieves the requested public catalog metadata and artwork only.
 
+### Tubi
+
+- movie, series, and episode pages, including exact Tubi content and parent-series IDs
+- complete provider-confirmed season and episode placement from Tubi's public multi-season guide; missing, malformed, or duplicate identities fail closed
+- title, description, year, runtime, rating, language, country, genres, cast, directors, poster, backdrop, logo, and episode thumbnail when Tubi exposes them
+- the exact `Tubi Provider` tag and Tubi unique ID in movie, series, and episode NFO files
+- exact-file handoff matching by Tubi episode ID before season/episode filename placement
+- Jellyfin year-qualified series roots, `Season xx` folders, `tvshow.nfo`, episode NFO/thumb sidecars, subtitle preservation, collision refusal, and safe empty-wrapper cleanup
+- metadata uses Tubi's anonymous public guest access only; playback manifests, DRM data, and subscription/account credentials are not collected or saved
+
 ## Requirements
 
 ### Core requirements
@@ -273,6 +286,18 @@ By default, saved title folders go in:
 ```text
 Output/
 ```
+
+## Automation Interfaces
+
+The ordinary per-file provider handoff is the organizing interface used by MediaFab:
+
+```bash
+python3 "Launchers/media_metadata_and_extras_getter.py" --handoff --detail-link "<provider-page>" --media-folder "/exact/path/to/completed-video.mkv" --skip-existing
+```
+
+`--media-folder` must identify one completed video file, not a directory. This interface applies the provider's canonical Jellyfin title root, season placement, filename, NFO, artwork, subtitle-sidecar, collision, and duplicate-validation rules described in the Queue Mode Provider Standard.
+
+The separate `--unshackle-handoff` interface intentionally does not rename or organize media or subtitles. It enriches the exact completed file in its existing location, leaving library layout decisions to the caller. It accepts `--detail-link` directly or provider identity fields supplied through `--unshackle-service`, `--unshackle-id`, `--unshackle-title`, `--unshackle-year`, `--unshackle-season`, `--unshackle-episode`, `--unshackle-episode-title`, and `--unshackle-sidecars`. `--skip-existing` may be used with either interface.
 
 ## How to Use the Tool
 
@@ -560,6 +585,21 @@ PBS KIDS series processing is enabled by default. All three supported PBS KIDS U
 - After the metadata workflow succeeds, timestamp-named MediaFab handoff folders are removed only when they contain nothing except `.DS_Store`.
 - Set either file-action setting to `false` to disable that action. Set `pbs_kids_series_metadata_enabled` to `false` to use ordinary single-page output.
 
+### Tubi series settings
+
+Tubi series processing is enabled by default. Series and episode pages load Tubi's complete provider-confirmed guide, but the tool writes episode files only for locally matched media. An exact episode handoff uses the Tubi content ID before considering season/episode text.
+
+```json
+"tubi_series_metadata_enabled": true,
+"tubi_series_rename_enabled": true,
+"tubi_series_organize_enabled": true
+```
+
+- `tubi_series_rename_enabled` renames matched episodes and existing subtitle sidecars to `S01E01 Show Title - Episode Title`, preserving each subtitle suffix.
+- `tubi_series_organize_enabled` places them under the year-qualified series root in `Season 01`, `Season 02`, and later season folders.
+- Every destination is validated before files move, existing files are never overwritten, and incomplete or ambiguous provider catalogs fail closed.
+- Set either file-action setting to `false` to disable that action. Set `tubi_series_metadata_enabled` to `false` to use ordinary single-page output.
+
 ### Paramount+ movie folders
 
 Paramount+ movie pages use a provider and movie-title folder, with the title and year as the filename base:
@@ -775,6 +815,44 @@ Wild Kratts/
 
 The series NFO contains the series name and description. Episode NFOs use `<episodedetails>` and contain the episode name, placement, video type, short `outline`, longer `plot`, runtime, premiere date, PBS KIDS video ID, and legacy PBS media ID. The artwork bundle contains only the requested provider images: series card art as `thumb`, the transparent series logo as `logo.png`, and the episode image as its matching `-thumb`.
 
+## Tubi Series Mode
+
+Provide a Tubi series page for manual matching or an exact `/tv-shows/<content-id>/...` episode page for a one-file handoff. The provider validates every exposed season and episode identity before organizing media; it does not infer missing episodes from numbering, runtime, or queue order.
+
+For example, start interactive mode and paste the supplied Tubi episode URL when prompted:
+
+```bash
+python3 "Launchers/media_metadata_and_extras_getter.py"
+```
+
+```text
+https://tubitv.com/tv-shows/200310461/s01-e01-house-of-bloo-s-pt-1
+```
+
+An automated exact-file handoff uses:
+
+```bash
+python3 "Launchers/media_metadata_and_extras_getter.py" --handoff --detail-link "https://tubitv.com/tv-shows/200310461/s01-e01-house-of-bloo-s-pt-1" --media-folder "/exact/path/to/completed-video.mkv" --skip-existing
+```
+
+The resulting Jellyfin layout is:
+
+```text
+Tubi/
+  Series Title (Year)/
+    tvshow.nfo
+    poster.jpg
+    backdrop.jpg
+    logo.png
+    Season 01/
+      S01E01 Series Title - Episode Title.mkv
+      S01E01 Series Title - Episode Title.en.srt
+      S01E01 Series Title - Episode Title.nfo
+      S01E01 Series Title - Episode Title-thumb.jpg
+```
+
+Later handoffs reuse the same series root and add only the supplied episode and sidecars. Tubi's provider-reported series year controls the root name. Metadata access uses an anonymous guest token held only in memory; the tool neither requests account credentials nor collects playback manifests or DRM data.
+
 ## Media Matching
 
 Media matching is optional and off by default. With it enabled, the tool searches the folders in `media_folders` for video files whose filename or parent folder resembles the scraped title. It supports common video extensions including `.mkv`, `.mp4`, `.m4v`, `.avi`, `.mov`, `.wmv`, `.ts`, `.m2ts`, `.webm`, and `.flv`.
@@ -802,13 +880,13 @@ Output/Example Movie/trailers/trailer.mp4
 Output/Example Movie/extrafanart/fanart-01.jpg
 ```
 
-Disney+, HBO Max, Netflix, and Paramount+ movies save under `Output/<Provider>/Movie Title (Year)/` during ordinary link processing and use `Movie Title (Year)` for their metadata, artwork, and local matched movie filename. During their MediaFab movie handoffs, the year-qualified movie folder remains beneath the supplied media location. Provider-native direct trailers use Jellyfin's `trailers/trailer.mp4` layout and run only after the main workflow.
+Disney+, HBO Max, Netflix, Paramount+, and Tubi movies save under `Output/<Provider>/Movie Title (Year)/` during ordinary link processing and use `Movie Title (Year)` for their metadata, artwork, and local matched movie filename. During their MediaFab movie handoffs, the year-qualified movie folder remains beneath the supplied media location. Provider-native direct trailers use Jellyfin's `trailers/trailer.mp4` layout and run only after the main workflow.
 
 When media matching finds a local video, the real filename replaces `<title>` in the NFO and artwork names. Available extra videos are saved directly under `extras/`.
 
 ## Metadata Written to the NFO
 
-The generated NFO has a `<movie>` root for films/one-off programmes, a `<tvshow>` root for Amazon Prime Video, Netflix, Disney+, HBO Max, BBC iPlayer, Paramount+, Crunchyroll, and PBS KIDS series pages, or an `<episodedetails>` root for matched episodes, and can include:
+The generated NFO has a `<movie>` root for films/one-off programmes, a `<tvshow>` root for Amazon Prime Video, Netflix, Disney+, HBO Max, BBC iPlayer, Paramount+, Crunchyroll, PBS KIDS, and Tubi series pages, or an `<episodedetails>` root for matched episodes, and can include:
 
 - title, original title, sort title, outline, plot, tagline, year, and date
 - runtime, rating, content rating, and language
@@ -852,14 +930,20 @@ Provider Scripts/
   netflix.py
   paramountplus.py
   pbs_kids.py
+  tubi.py
 
 Tests/
   test_amazon_prime.py
+  test_bbc_iplayer.py
   test_crunchyroll.py
   test_disneyplus.py
   test_hbomax.py
+  test_netflix.py
   test_paramountplus.py
   test_pbs_kids.py
+  test_queue_mode_contract.py
+  test_tubi.py
+  test_unshackle_handoff.py
 
 Settings/
   settings-default.json

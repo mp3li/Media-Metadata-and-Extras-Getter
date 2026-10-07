@@ -209,6 +209,15 @@ class HBOMaxMediaGroup:
 
 
 @dataclass
+class TubiMediaGroup:
+    folder: Path
+    stem: str
+    season: int
+    episode: int
+    files: list[Path] = field(default_factory=list)
+
+
+@dataclass
 class NetflixMediaGroup:
     folder: Path
     stem: str
@@ -323,6 +332,7 @@ pbs_kids = load_provider_script("pbs_kids")
 bbc_iplayer = load_provider_script("bbc_iplayer")
 paramountplus = load_provider_script("paramountplus")
 crunchyroll = load_provider_script("crunchyroll")
+tubi = load_provider_script("tubi")
 
 PROVIDER_HANDLERS = [
     ("amazon", amazon.NAME, amazon.is_supported_url),
@@ -333,6 +343,7 @@ PROVIDER_HANDLERS = [
     ("bbc_iplayer", bbc_iplayer.NAME, bbc_iplayer.is_supported_url),
     ("paramountplus", paramountplus.NAME, paramountplus.is_supported_url),
     ("crunchyroll", crunchyroll.NAME, crunchyroll.is_supported_url),
+    ("tubi", tubi.NAME, tubi.is_supported_url),
 ]
 
 
@@ -447,6 +458,8 @@ def scrape_url(url: str) -> Metadata:
         return metadata_from_provider_dict(paramountplus.extract_metadata(normalized), detail_link=url)
     if provider == "crunchyroll":
         return metadata_from_provider_dict(crunchyroll.extract_metadata(normalized), detail_link=url)
+    if provider == "tubi":
+        return metadata_from_provider_dict(tubi.extract_metadata(normalized), detail_link=url)
     raise UnsupportedProviderError(UNSUPPORTED_PROVIDER_MESSAGE)
 
 
@@ -517,6 +530,7 @@ def format_preview(meta: Metadata) -> str:
         paramountplus.NAME,
         pbs_kids.NAME,
         amazon.PRIME_NAME,
+        tubi.NAME,
     }
     rows = [
         ("Source Site", meta.source_site),
@@ -1058,6 +1072,8 @@ def resolve_or_validate_media_targets(
 
 
 def default_folder_name(meta: Metadata) -> str:
+    if is_tubi_movie(meta):
+        return tubi_movie_name(meta)
     if is_netflix_movie(meta):
         return netflix_movie_name(meta)
     if is_hbomax_movie(meta):
@@ -1084,6 +1100,51 @@ def is_netflix_movie(meta: Metadata) -> bool:
 def netflix_movie_name(meta: Metadata) -> str:
     title = safe_filename(meta.title)
     return safe_filename(f"{title} ({meta.year})") if meta.year.isdigit() else title
+
+
+def is_tubi_movie(meta: Metadata) -> bool:
+    return meta.source_site == tubi.NAME and meta.media_kind.casefold() == "movie"
+
+
+def tubi_movie_name(meta: Metadata) -> str:
+    title = safe_filename(meta.title)
+    return safe_filename(f"{title} ({meta.year})") if meta.year.isdigit() else title
+
+
+def organize_tubi_movie(
+    match: MediaMatch,
+    meta: Metadata,
+    settings: dict[str, Any],
+    explicit_folder: str = "",
+    skip_existing: bool = False,
+) -> MediaMatch:
+    if not is_tubi_movie(meta) or not match.video_path.exists():
+        return match
+    base = tubi_movie_name(meta)
+    destination = (
+        match.folder
+        if explicit_folder and normalize_match_key(match.folder.name) == normalize_match_key(base)
+        else (match.folder if explicit_folder else settings_output_dir(settings) / tubi.NAME) / base
+    )
+    source_stem = match.video_path.stem
+    related = [
+        path for path in match.folder.iterdir()
+        if path.is_file()
+        and path.suffix.casefold() in VIDEO_EXTENSIONS | {".srt", ".vtt", ".ass", ".ssa", ".sub"}
+        and (path.stem == source_stem or path.name.startswith(source_stem + "."))
+    ]
+    targets = [destination / (base + path.name[len(source_stem):]) for path in related]
+    pairs = list(zip(related, targets))
+    if resolve_or_validate_media_targets(pairs, related, "Tubi", skip_existing=skip_existing):
+        video = next((target for target in targets if target.suffix.casefold() in VIDEO_EXTENSIONS), match.video_path)
+        return MediaMatch(destination, video, base, match.score)
+    destination.mkdir(parents=True, exist_ok=True)
+    for source, target in pairs:
+        if source != target:
+            shutil.move(str(source), str(target))
+    video = next((target for target in targets if target.suffix.casefold() in VIDEO_EXTENSIONS), match.video_path)
+    cleanup_empty_handoff_wrapper(explicit_folder, destination)
+    return MediaMatch(destination, video, base, match.score)
 
 
 def organize_netflix_movie(
@@ -4370,6 +4431,210 @@ def save_pbs_kids_series_metadata(
     return saved
 
 
+def tubi_series_folder_name(meta: Metadata) -> str:
+    return crunchyroll_series_folder_name(meta)
+
+
+def tubi_target_base(meta: Metadata, group: TubiMediaGroup | None = None) -> str:
+    season = group.season if group else int(meta.season_number or 1)
+    episode = group.episode if group else int(meta.episode_number or 0)
+    value = f"S{season:02d}E{episode:02d} {meta.show_title or meta.title}"
+    if meta.episode_title:
+        value += f" - {meta.episode_title}"
+    return safe_filename(value)
+
+
+def tubi_show_folder(folder: Path, meta: Metadata) -> Path:
+    resolved = folder.resolve()
+    root = resolved.parent if is_season_folder_name(resolved.name) else resolved
+    title = safe_filename(meta.show_title or meta.title)
+    desired = tubi_series_folder_name(meta)
+    if normalize_match_key(root.name) == normalize_match_key(desired):
+        return root
+    root_title = series_title_without_year(root.name)
+    if normalize_match_key(root_title) == normalize_match_key(title):
+        return root.parent / desired
+    return reusable_output_series_folder(root, title, desired)
+
+
+def tubi_episode_position(text: str) -> tuple[int, int] | None:
+    for pattern in (
+        r"\bS(\d{1,2})\s*E(\d{1,3})\b", r"\bSeason\s*(\d{1,2})\s*Episode\s*(\d{1,3})\b",
+        r"\b(\d{1,2})x(\d{1,3})\b",
+    ):
+        match = re.search(pattern, text, re.I)
+        if match:
+            return int(match.group(1)), int(match.group(2))
+    return None
+
+
+def tubi_media_groups(
+    meta: Metadata, settings: dict[str, Any], explicit_folder: str = ""
+) -> list[tuple[TubiMediaGroup, dict[str, Any]]]:
+    records = [record for record in meta.series_episodes if isinstance(record, dict)]
+    guide = {
+        (int(record["season"]), int(record["episode"])): record
+        for record in records
+        if clean_text(record.get("season")).isdigit() and clean_text(record.get("episode")).isdigit()
+    }
+    roots = [Path(explicit_folder).expanduser().resolve()] if explicit_folder else media_search_roots(settings)
+    candidates: list[Path] = []
+    for root in roots:
+        if root.is_file() and root.suffix.casefold() in VIDEO_EXTENSIONS:
+            candidates.append(root)
+        elif root.is_dir():
+            candidates.extend(path for path in root.rglob("*") if path.is_file() and path.suffix.casefold() in VIDEO_EXTENSIONS)
+    direct = None
+    if meta.media_kind.casefold() == "episode" and meta.season_number.isdigit() and meta.episode_number.isdigit():
+        direct = guide.get((int(meta.season_number), int(meta.episode_number)))
+    matched: list[tuple[TubiMediaGroup, dict[str, Any]]] = []
+    claimed: set[tuple[int, int]] = set()
+    title_key = normalize_match_key(meta.show_title or meta.title)
+    for video in sorted(set(candidates)):
+        if candidate_is_in_foreign_series_root(video, explicit_folder, meta.show_title or meta.title):
+            continue
+        stem_key = normalize_match_key(f"{video.stem} {video.parent.name}")
+        identity_matches = [
+            record for record in records
+            if clean_text(record.get("id")) and normalize_match_key(record["id"]) in stem_key
+        ]
+        record = direct if explicit_folder and len(candidates) == 1 and direct else (
+            identity_matches[0] if len(identity_matches) == 1 else None
+        )
+        position = (
+            (int(record["season"]), int(record["episode"])) if record else tubi_episode_position(f"{video.stem} {video.parent.name}")
+        )
+        if not record and position and title_key in stem_key:
+            record = guide.get(position)
+        if not record or not position or position in claimed:
+            continue
+        claimed.add(position)
+        matched.append((TubiMediaGroup(video.parent, video.stem, *position, [video, *local_episode_sidecars(video)]), record))
+    return sorted(matched, key=lambda item: (item[0].season, item[0].episode, str(item[0].folder)))
+
+
+def prepare_tubi_media_group(
+    meta: Metadata,
+    group: TubiMediaGroup,
+    settings: dict[str, Any],
+    skip_existing: bool = False,
+    explicit_show_folder: Path | None = None,
+) -> TubiMediaGroup:
+    rename = bool(settings.get("tubi_series_rename_enabled", True))
+    organize = bool(settings.get("tubi_series_organize_enabled", True))
+    if not (rename or organize):
+        return group
+    destination = jellyfin_season_folder(
+        explicit_show_folder or tubi_show_folder(group.folder, meta), group.season
+    ) if organize else group.folder
+    base = tubi_target_base(meta, group) if rename else group.stem
+    targets: list[tuple[Path, Path]] = []
+    used: set[Path] = set()
+    for source in group.files:
+        suffix = source.name[len(group.stem):]
+        target = destination / ((base + suffix) if rename else source.name)
+        if target in used:
+            raise FileExistsError(f"Tubi rename target already exists: {target}")
+        used.add(target); targets.append((source, target))
+    if resolve_or_validate_media_targets(targets, group.files, "Tubi", skip_existing=skip_existing):
+        final = [target for _source, target in targets]
+        video = next((path for path in final if path.suffix.casefold() in VIDEO_EXTENSIONS), None)
+        return TubiMediaGroup(destination, video.stem if video else base, group.season, group.episode, final)
+    destination.mkdir(parents=True, exist_ok=True)
+    temporary: list[tuple[Path, Path]] = []
+    for index, (source, target) in enumerate(targets, start=1):
+        if source == target:
+            temporary.append((source, target)); continue
+        temp = source.with_name(f".tubi-rename-{index}-{source.name}")
+        source.rename(temp); temporary.append((temp, target))
+    for temporary_path, target in temporary:
+        if temporary_path != target:
+            temporary_path.rename(target)
+    final = [target for _source, target in targets]
+    video = next((path for path in final if path.suffix.casefold() in VIDEO_EXTENSIONS), None)
+    return TubiMediaGroup(destination, video.stem if video else base, group.season, group.episode, final)
+
+
+def tubi_episode_metadata(meta: Metadata, record: dict[str, Any]) -> Metadata:
+    if (
+        meta.media_kind.casefold() == "episode"
+        and meta.season_number == str(record.get("season"))
+        and meta.episode_number == str(record.get("episode"))
+    ):
+        return meta
+    url = tubi.canonical_episode_url(record)
+    return metadata_from_provider_dict(tubi.extract_metadata(url, timeout=HTTP_TIMEOUT_SECONDS), detail_link=url)
+
+
+def tubi_parent_series_meta(meta: Metadata) -> Metadata:
+    return metadata_from_provider_dict(meta.series_metadata) if meta.series_metadata else meta
+
+
+def save_tubi_show_art(meta: Metadata, show_folder: Path) -> list[Path]:
+    saved: list[Path] = []
+    for name, url in (("poster", meta.poster_url), ("backdrop", meta.fanart_url), ("logo", meta.logo_url)):
+        if not clean_text(url):
+            continue
+        extension = image_extension_from_url(url) or (".png" if name == "logo" else ".jpg")
+        target = show_folder / f"{name}{extension}"
+        if target.exists():
+            continue
+        path = download_binary(url, target)
+        if path:
+            if name == "logo" and isinstance(path, Path):
+                path = normalize_provider_logo_file(path)
+            saved.append(path)
+    return saved
+
+
+def save_tubi_series_metadata(
+    meta: Metadata, settings: dict[str, Any], explicit_folder: str = "", skip_existing: bool = False
+) -> list[Path] | None:
+    if not (
+        meta.source_site == tubi.NAME and meta.media_kind.casefold() in {"series", "episode"}
+        and bool(settings.get("tubi_series_metadata_enabled", True))
+        and bool(explicit_folder or media_search_roots(settings))
+    ):
+        return None
+    matches = tubi_media_groups(meta, settings, explicit_folder)
+    if not matches:
+        return []
+    explicit_show_folder = provider_handoff_show_folder(
+        explicit_folder, meta, tubi_series_folder_name(meta), {"Tubi"}
+    )
+    saved: list[Path] = []
+    bundled: set[Path] = set()
+    for group, record in matches:
+        episode_meta = tubi_episode_metadata(meta, record)
+        prepared = prepare_tubi_media_group(
+            episode_meta, group, settings, skip_existing=skip_existing,
+            explicit_show_folder=explicit_show_folder,
+        )
+        show_folder = explicit_show_folder or tubi_show_folder(prepared.folder, episode_meta)
+        if show_folder not in bundled:
+            series_meta = tubi_parent_series_meta(episode_meta)
+            saved.extend(save_metadata_bundle_to_location(
+                series_meta, show_folder, "tvshow", skip_existing=True, include_artwork=False
+            ))
+            saved.extend(save_tubi_show_art(series_meta, show_folder))
+            bundled.add(show_folder)
+        video = next((path for path in prepared.files if path.suffix.casefold() in VIDEO_EXTENSIONS), None)
+        if not video:
+            continue
+        nfo = video.with_suffix(".nfo")
+        if not (skip_existing and nfo.exists()):
+            nfo.write_text(build_nfo(episode_meta), encoding="utf-8"); saved.append(nfo)
+        extension = image_extension_from_url(episode_meta.thumb_url) or ".jpg"
+        thumb = video.with_name(f"{video.stem}-thumb{extension}")
+        if episode_meta.thumb_url and not thumb.exists():
+            path = download_binary(episode_meta.thumb_url, thumb)
+            if path:
+                saved.append(path)
+    cleanup_empty_handoff_wrapper(explicit_folder, explicit_show_folder)
+    print(f"Tubi series mode found {len(matches)} local episode(s) and saved {len(saved)} item(s).")
+    return saved
+
+
 def paramountplus_series_enabled(
     meta: Metadata, settings: dict[str, Any], explicit_folder: str = ""
 ) -> bool:
@@ -4912,6 +5177,14 @@ def save_provider_series_metadata(
     )
     if saved is not None:
         return saved
+    saved = save_tubi_series_metadata(
+        meta,
+        settings,
+        explicit_folder=explicit_folder,
+        skip_existing=skip_existing,
+    )
+    if saved is not None:
+        return saved
     return save_paramountplus_series_metadata(
         meta,
         settings,
@@ -4943,6 +5216,9 @@ def output_plan(
             match, meta, settings, explicit_folder=explicit_folder, skip_existing=skip_existing
         )
         match = organize_paramountplus_movie(
+            match, meta, settings, explicit_folder=explicit_folder, skip_existing=skip_existing
+        )
+        match = organize_tubi_movie(
             match, meta, settings, explicit_folder=explicit_folder, skip_existing=skip_existing
         )
         return match.folder, match.filename_base
@@ -5074,6 +5350,25 @@ def output_plan(
             ),
             base,
         )
+    if meta.source_site == tubi.NAME and meta.media_kind.casefold() == "series":
+        return settings_output_dir(settings) / tubi.NAME / tubi_series_folder_name(meta), "tvshow"
+    if (
+        meta.source_site == tubi.NAME
+        and meta.media_kind.casefold() == "episode"
+        and meta.season_number.isdigit()
+        and meta.episode_number.isdigit()
+    ):
+        base = tubi_target_base(meta)
+        return (
+            jellyfin_season_folder(
+                settings_output_dir(settings) / tubi.NAME / tubi_series_folder_name(meta),
+                int(meta.season_number),
+            ),
+            base,
+        )
+    if meta.source_site == tubi.NAME and meta.media_kind.casefold() == "movie":
+        base = tubi_movie_name(meta)
+        return settings_output_dir(settings) / tubi.NAME / base, base
     folder = settings_output_dir(settings) / default_folder_name(meta)
     return folder, safe_filename(meta.folder_name_override or meta.title)
 
@@ -5226,6 +5521,7 @@ def save_metadata_bundle_to_location(
             paramountplus.NAME,
             pbs_kids.NAME,
             amazon.PRIME_NAME,
+            tubi.NAME,
         }
         and meta.media_kind.casefold() in {"series", "episode"}
     ):
@@ -5247,6 +5543,8 @@ def save_metadata_bundle_to_location(
                 saved.extend(save_hbomax_show_art(meta, show_folder))
         elif meta.source_site == pbs_kids.NAME:
             saved.extend(save_pbs_kids_show_art(meta, show_folder))
+        elif meta.source_site == tubi.NAME:
+            saved.extend(save_tubi_show_art(tubi_parent_series_meta(meta), show_folder))
         else:
             saved.extend(save_paramountplus_show_art(meta, show_folder))
         return saved
