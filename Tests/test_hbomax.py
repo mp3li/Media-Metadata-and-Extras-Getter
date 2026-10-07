@@ -28,6 +28,8 @@ base = load_module("test_hbomax_base", ROOT / "Base Script" / "media_metadata_an
 MOVIE = "https://play.hbomax.com/movie/fad09d13-9973-4de6-9387-8698ba6ef4cf"
 SHOW = "https://play.hbomax.com/show/4ffd33c9-e0d6-4cd6-bd13-34c266c79be0"
 EPISODE_ID = "a4c77a14-d711-440f-9907-0afc17f0e2a9"
+SEASON_TWO_ID = "7f388f5d-89f6-42fd-a74c-197d3e535885"
+SEASON_THREE_ID = "bf83f162-c17d-4bc7-bfea-8019afcad4e5"
 EPISODE = f"https://www.hbomax.com/show/4ffd33c9-e0d6-4cd6-bd13-34c266c79be0/s1/e1-pilot/{EPISODE_ID}"
 
 
@@ -47,15 +49,25 @@ def episode(number: int, identifier: str, title: str, season: int = 1) -> dict:
     }
 
 
-def show_record(complete: bool) -> dict:
+def show_record(selected: int | None) -> dict:
     seasons = [
         {
-            "seasonId": "season-one", "seasonNumber": 1, "numberOfEpisodes": 2,
-            "episodes": [episode(1, EPISODE_ID, "Pilot")] + ([episode(2, "5175ef20-29bc-499d-930e-f50805ff266d", "Next")] if complete else []),
+            "seasonId": "season-one", "seasonNumber": 1, "seasonNumberSlug": "",
+            "numberOfEpisodes": 2 if selected in {1, None} else 0,
+            "episodes": [
+                episode(1, EPISODE_ID, "Pilot"),
+                episode(2, "5175ef20-29bc-499d-930e-f50805ff266d", "Next"),
+            ] if selected in {1, None} else [],
         },
         {
-            "seasonId": "season-two", "seasonNumber": 2, "numberOfEpisodes": 1,
-            "episodes": [episode(1, "7f388f5d-89f6-42fd-a74c-197d3e535885", "Season Two", season=2)] if complete else [],
+            "seasonId": "season-two", "seasonNumber": 2, "seasonNumberSlug": "s2",
+            "numberOfEpisodes": 1 if selected in {2, None} else 0,
+            "episodes": [episode(1, SEASON_TWO_ID, "Season Two", season=2)] if selected in {2, None} else [],
+        },
+        {
+            "seasonId": "season-three", "seasonNumber": 3, "seasonNumberSlug": "s3",
+            "numberOfEpisodes": 1 if selected in {3, None} else 0,
+            "episodes": [episode(1, SEASON_THREE_ID, "Season Three", season=3)] if selected in {3, None} else [],
         },
     ]
     return {
@@ -63,7 +75,7 @@ def show_record(complete: bool) -> dict:
         "imageUrlLink": "/show/4ffd33c9-e0d6-4cd6-bd13-34c266c79be0",
         "title": {"short": "Euphoria", "full": "Euphoria"},
         "summary": {"short": "Short series", "full": "Full series description"},
-        "releaseYear": "2019", "numberOfSeasons": 2, "numberOfEpisodes": 3,
+        "releaseYear": "2019", "numberOfSeasons": 3, "numberOfEpisodes": 4,
         "genres": ["Drama"], "primaryGenre": "Drama", "secondaryGenre": "",
         "brand": ["HBOTV"], "status": "published",
         "localizedRating": {"rating_authority": "us-fcc-tv", "classifier": "TV-MA", "descriptors": ["L", "S", "V"]},
@@ -87,8 +99,11 @@ def movie_record() -> dict:
     }
 
 
-def page(record: dict) -> str:
-    payload = {"props": {"pageProps": {"mappedData": {"idref": record}}}}
+def page(record: dict, selected: int | None = None) -> str:
+    page_props = {"mappedData": {"idref": record}}
+    if selected is not None:
+        page_props["selectedSeasonNumber"] = selected
+    payload = {"props": {"pageProps": page_props}}
     return f'<script id="__NEXT_DATA__" type="application/json">{json.dumps(payload)}</script>'
 
 
@@ -97,7 +112,8 @@ class HBOMaxTests(unittest.TestCase):
         def fetch(page_url: str, timeout: int = 25):
             if "/movie/" in page_url:
                 return page(movie_record())
-            return page(show_record(complete=EPISODE_ID in page_url and "/s1/" in page_url))
+            selected = 3 if page_url.rstrip("/").endswith("/s3") else 2 if page_url.rstrip("/").endswith("/s2") else 1
+            return page(show_record(selected=selected), selected=selected)
         with patch.object(hbomax, "fetch_text", side_effect=fetch):
             return hbomax.extract_metadata(url)
 
@@ -116,14 +132,33 @@ class HBOMaxTests(unittest.TestCase):
 
     def test_show_enriches_complete_guide_and_keeps_trailer_metadata(self):
         item = self.extract(SHOW)
-        self.assertEqual(len(item["series_episodes"]), 3)
+        self.assertEqual(len(item["series_episodes"]), 4)
         self.assertEqual(
             [(record["season"], record["episode"]) for record in item["series_episodes"]],
-            [(1, 1), (1, 2), (2, 1)],
+            [(1, 1), (1, 2), (2, 1), (3, 1)],
         )
+        self.assertEqual(item["series_episodes"][2]["id"], SEASON_TWO_ID)
+        self.assertEqual(item["series_episodes"][3]["id"], SEASON_THREE_ID)
+        self.assertEqual(item["series_episodes"][3]["title"], "Season Three")
+        self.assertEqual(
+            item["series_episodes"][3]["url"],
+            f"https://www.hbomax.com/show/4ffd33c9-e0d6-4cd6-bd13-34c266c79be0/s3/e1/{SEASON_THREE_ID}",
+        )
+        self.assertEqual(item["series_episodes"][3]["image"], "https://img.example/episode-1-thumb.jpg")
         self.assertEqual(item["extra_fields"]["Trailer title"], ["Euphoria: Tease"])
         self.assertEqual(item["extra_fields"]["Trailer program ID"], ["PROM649125"])
         self.assertEqual(item["trailer_url"], "https://play.hbomax.com/video/watch/PROM649125")
+
+    def test_advertised_season_failure_refuses_partial_catalog(self):
+        def fetch(page_url: str, timeout: int = 25):
+            if page_url.rstrip("/").endswith("/s3"):
+                raise ValueError("network failed")
+            selected = 2 if page_url.rstrip("/").endswith("/s2") else 1
+            return page(show_record(selected=selected), selected=selected)
+
+        with patch.object(hbomax, "fetch_text", side_effect=fetch):
+            with self.assertRaisesRegex(ValueError, "Season 3 could not be loaded.*partial catalog"):
+                hbomax.extract_metadata(SHOW)
 
     def test_exact_episode_has_only_one_landscape_thumb(self):
         item = self.extract(EPISODE)
@@ -141,7 +176,7 @@ class HBOMaxTests(unittest.TestCase):
             "audioLanguages": [{"displayName": "English - Original"}],
             "subtitleTracks": [{"label": "English - CC"}],
         })
-        item = show_record(complete=True)
+        item = show_record(selected=None)
         item["seasons"][0]["episodes"][0] = record
         series = hbomax.series_metadata(item, SHOW)
         selected = series["series_episodes"][0]
@@ -158,6 +193,49 @@ class HBOMaxTests(unittest.TestCase):
             matches = base.hbomax_media_groups(meta, {}, explicit_folder=temp)
             self.assertEqual(len(matches), 1)
             self.assertEqual((matches[0][0].season, matches[0][0].episode), (1, 1))
+
+    def test_per_file_handoffs_put_later_seasons_in_the_same_jellyfin_root(self):
+        meta = base.metadata_from_provider_dict(self.extract(SHOW))
+        with tempfile.TemporaryDirectory() as temp:
+            download = Path(temp) / "HBOMax"
+            season_one_wrapper = download / "Euphoria S01 1080p HMAX"
+            root = season_one_wrapper / "Euphoria (2019-)"
+            season_one = root / "Season 01"
+            season_one.mkdir(parents=True)
+            correct_season_one = season_one / "S01E01 Euphoria - Pilot.mkv"
+            correct_season_one.write_bytes(b"correct season one")
+            season_two_source = download / "Euphoria S02 1080p HMAX" / f"download-{SEASON_TWO_ID}.mkv"
+            season_three_source = download / "Euphoria S03 1080p HMAX" / f"download-{SEASON_THREE_ID}.mkv"
+            season_two_source.parent.mkdir(parents=True)
+            season_three_source.parent.mkdir(parents=True)
+            season_two_source.write_bytes(b"season two")
+            season_three_source.write_bytes(b"season three")
+
+            def fake_download(_url: str, target: Path):
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_bytes(b"art")
+                return target
+
+            with patch.object(base, "download_binary", side_effect=fake_download), patch.object(
+                base, "save_hbomax_trailer", return_value=[]
+            ), patch.object(base, "save_hbomax_extra_videos", return_value=[]):
+                for source in (season_two_source, season_three_source):
+                    saved = base.save_hbomax_series_metadata(
+                        meta, {}, explicit_folder=str(source), skip_existing=True
+                    )
+                    self.assertIsNotNone(saved)
+
+            root = download / "Euphoria (2019-)"
+            self.assertEqual(
+                (root / "Season 01" / correct_season_one.name).read_bytes(),
+                b"correct season one",
+            )
+            self.assertFalse(season_one_wrapper.exists())
+            self.assertTrue((root / "Season 02" / "S02E01 Euphoria - Season Two.mkv").exists())
+            self.assertTrue((root / "Season 03" / "S03E01 Euphoria - Season Three.mkv").exists())
+            self.assertFalse(season_two_source.parent.exists())
+            self.assertFalse(season_three_source.parent.exists())
+            self.assertEqual(len(list(root.glob("tvshow.nfo"))), 1)
 
     def test_queue_matches_uuid_and_saves_only_one_episode_image(self):
         meta = base.metadata_from_provider_dict(self.extract(SHOW))

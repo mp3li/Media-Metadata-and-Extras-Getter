@@ -45,8 +45,9 @@ def extract_metadata(url: str, timeout: int = 25) -> dict[str, Any]:
     if is_movie:
         return movie_metadata(content, normalized)
 
-    content = complete_series_record(content, normalized, timeout=timeout)
-    series = series_metadata(content, canonical_show_url(content, normalized))
+    show_url = canonical_show_url(content, normalized)
+    content = complete_series_record(content, show_url, timeout=timeout)
+    series = series_metadata(content, show_url)
     selected = next((record for record in series["series_episodes"] if record["id"] == requested_id), None)
     return episode_metadata(series, selected, normalized) if selected else series
 
@@ -96,37 +97,80 @@ def find_content_record(props: dict[str, Any]) -> dict[str, Any]:
 
 def complete_series_record(content: dict[str, Any], source_url: str, timeout: int) -> dict[str, Any]:
     seasons = content.get("seasons") if isinstance(content.get("seasons"), list) else []
-    expected = sum(int_value(season.get("numberOfEpisodes")) for season in seasons if isinstance(season, dict))
-    present = sum(len(season.get("episodes", [])) for season in seasons if isinstance(season, dict) and isinstance(season.get("episodes"), list))
-    incomplete_season = any(
-        isinstance(season, dict)
-        and int_value(season.get("seasonNumber"))
-        and not season.get("episodes")
-        for season in seasons
-    )
-    if (present >= expected and not incomplete_season) or not seasons:
+    if not seasons:
         return content
-    first_url = next((
-        clean_text(episode.get("episodeUrl"))
-        for season in seasons if isinstance(season, dict)
-        for episode in season.get("episodes", []) if isinstance(episode, dict)
-        if clean_text(episode.get("episodeUrl"))
-    ), "")
-    if not first_url:
-        return content
-    try:
-        richer = find_content_record(next_page_props(fetch_text(urllib.parse.urljoin(source_url, first_url), timeout=timeout)))
-    except Exception:
-        return content
-    richer_seasons = richer.get("seasons") if isinstance(richer.get("seasons"), list) else []
-    richer_count = sum(len(item.get("episodes", [])) for item in richer_seasons if isinstance(item, dict) and isinstance(item.get("episodes"), list))
-    if richer_count <= present:
-        return content
+
+    series_id = clean_text(content.get("seriesId") or content.get("hbomaxId"))
+    descriptors: list[tuple[str, int, str, dict[str, Any]]] = []
+    identities: set[tuple[str, int]] = set()
+    for season in seasons:
+        if not isinstance(season, dict):
+            continue
+        season_id = clean_text(season.get("seasonId"))
+        season_number = int_value(season.get("seasonNumber"))
+        season_slug = clean_text(season.get("seasonNumberSlug"))
+        identity = (season_id, season_number)
+        if not season_id or not season_number or identity in identities:
+            raise ValueError("HBO Max exposed an invalid or duplicate season selector; refusing a partial catalog.")
+        identities.add(identity)
+        descriptors.append((season_id, season_number, season_slug, season))
+
+    completed: list[dict[str, Any]] = []
+    for season_id, season_number, season_slug, initial in descriptors:
+        selected = initial
+        episodes = initial.get("episodes") if isinstance(initial.get("episodes"), list) else []
+        expected = int_value(initial.get("numberOfEpisodes"))
+        initial_complete = bool(episodes) and (not expected or len(episodes) == expected)
+        if not initial_complete:
+            if not season_slug:
+                raise ValueError(
+                    f"HBO Max Season {season_number} has no provider selector URL; refusing a partial catalog."
+                )
+            selector_url = urllib.parse.urljoin(source_url.rstrip("/") + "/", season_slug)
+            try:
+                selector_props = next_page_props(fetch_text(selector_url, timeout=timeout))
+            except Exception as exc:
+                raise ValueError(
+                    f"HBO Max Season {season_number} could not be loaded; refusing a partial catalog."
+                ) from exc
+            if int_value(selector_props.get("selectedSeasonNumber")) != season_number:
+                raise ValueError(
+                    f"HBO Max Season {season_number} selector did not confirm the requested season; "
+                    "refusing a partial catalog."
+                )
+            selected_series = find_content_record(selector_props)
+            selected_series_id = clean_text(selected_series.get("seriesId") or selected_series.get("hbomaxId"))
+            if not selected_series or selected_series_id != series_id:
+                raise ValueError(
+                    f"HBO Max Season {season_number} selector returned a different series; refusing a partial catalog."
+                )
+            matches = [
+                value
+                for value in selected_series.get("seasons", [])
+                if isinstance(value, dict)
+                and clean_text(value.get("seasonId")) == season_id
+                and int_value(value.get("seasonNumber")) == season_number
+            ]
+            if len(matches) != 1:
+                raise ValueError(
+                    f"HBO Max Season {season_number} selector did not expose one exact season record; "
+                    "refusing a partial catalog."
+                )
+            selected = matches[0]
+            episodes = selected.get("episodes") if isinstance(selected.get("episodes"), list) else []
+            expected = int_value(selected.get("numberOfEpisodes"))
+
+        if expected != len(episodes):
+            raise ValueError(
+                f"HBO Max Season {season_number} exposed {len(episodes)} of {expected} episodes; "
+                "refusing a partial catalog."
+            )
+        completed.append(selected)
+
     merged = dict(content)
-    merged.update(richer)
-    for key in ("trailer", "flags"):
-        if content.get(key) and not richer.get(key):
-            merged[key] = content[key]
+    merged["seasons"] = sorted(completed, key=lambda value: int_value(value.get("seasonNumber")))
+    merged["numberOfSeasons"] = len(completed)
+    merged["numberOfEpisodes"] = sum(len(value.get("episodes", [])) for value in completed)
     return merged
 
 

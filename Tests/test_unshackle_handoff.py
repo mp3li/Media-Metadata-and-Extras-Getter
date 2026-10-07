@@ -243,6 +243,67 @@ class UnshackleHandoffTests(unittest.TestCase):
             self.assertTrue(show.joinpath("tvshow.nfo").exists())
             self.assertFalse(any(path.name.startswith("Not Downloaded") for path in show.rglob("*")))
 
+    def test_hbomax_show_link_matches_a_later_season_episode_id(self):
+        with tempfile.TemporaryDirectory() as temp:
+            show = Path(temp) / "And Just Like That (2021-)"
+            season = show / "Season 03"
+            season.mkdir(parents=True)
+            video = season / "And.Just.Like.That.S03E01.HMAX.mkv"
+            video.write_bytes(b"episode")
+            episode_id = "ce36cda4-b0b1-420e-990f-8628adf36039"
+            catalog = base.Metadata(
+                source_url="https://www.hbomax.com/show/b9c27771-247a-459d-b751-85460d3fd5a2",
+                detail_link="https://www.hbomax.com/show/b9c27771-247a-459d-b751-85460d3fd5a2",
+                source_site=base.hbomax.NAME,
+                media_kind="series",
+                title="And Just Like That...",
+                show_title="And Just Like That...",
+                plot="Series plot.",
+                year="2021",
+                tags=["HBO Max Provider"],
+                series_episodes=[{
+                    "id": episode_id,
+                    "season": 3,
+                    "episode": 1,
+                    "title": "Outlook Good",
+                    "description": "Episode plot.",
+                    "url": (
+                        "https://www.hbomax.com/show/b9c27771-247a-459d-b751-85460d3fd5a2/"
+                        f"s3/e1-outlook-good/{episode_id}"
+                    ),
+                    "image": "https://images.test/s03e01.jpg",
+                }],
+            )
+
+            def fake_download(_url, target):
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_bytes(b"downloaded")
+                return target
+
+            args = arguments(
+                video,
+                detail_link=catalog.detail_link,
+                unshackle_service="HMAX",
+                unshackle_id=episode_id,
+                unshackle_title="And Just Like That...",
+                unshackle_year="2021",
+                unshackle_season="3",
+                unshackle_episode="1",
+                unshackle_episode_title="Outlook Good",
+            )
+            with (
+                patch.object(base, "AnimatedStatus"),
+                patch.object(base, "scrape_url", return_value=catalog),
+                patch.object(base, "download_binary", side_effect=fake_download),
+            ):
+                self.assertEqual(base.run_unshackle_handoff(args), 0)
+
+            nfo = video.with_suffix(".nfo").read_text(encoding="utf-8")
+            self.assertIn("<season>3</season>", nfo)
+            self.assertIn("<episode>1</episode>", nfo)
+            self.assertIn(f'<uniqueid type="hbomax" default="false">{episode_id}</uniqueid>', nfo)
+            self.assertTrue(show.joinpath("tvshow.nfo").exists())
+
     def test_parser_accepts_unshackle_post_script_context(self):
         args = base.build_parser().parse_args([
             "--unshackle-handoff",

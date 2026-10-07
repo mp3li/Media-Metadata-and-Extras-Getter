@@ -2990,10 +2990,49 @@ def hbomax_show_folder(folder: Path, meta: Metadata) -> Path:
     return root / desired
 
 
+def hbomax_explicit_show_folder(explicit_folder: str, meta: Metadata) -> Path | None:
+    show_folder = provider_handoff_show_folder(
+        explicit_folder,
+        meta,
+        hbomax_series_folder_name(meta),
+        {"HBOMax", "HBO Max", "Max"},
+    )
+    if not show_folder:
+        return None
+    supplied = Path(explicit_folder).expanduser().resolve()
+    provider_keys = {normalize_match_key(value) for value in ("HBOMax", "HBO Max", "Max")}
+    provider_root = next(
+        (candidate for candidate in (supplied.parent, *supplied.parents) if normalize_match_key(candidate.name) in provider_keys),
+        None,
+    )
+    title_key = normalize_match_key(safe_filename(meta.show_title or meta.title))
+    if provider_root and provider_root.is_dir():
+        for wrapper in provider_root.iterdir():
+            if (
+                not wrapper.is_dir()
+                or wrapper.is_symlink()
+                or wrapper.resolve() == show_folder.resolve()
+                or title_key not in normalize_match_key(wrapper.name)
+            ):
+                continue
+            entries = list(wrapper.iterdir())
+            if any(entry.name != ".DS_Store" for entry in entries):
+                continue
+            ds_store = wrapper / ".DS_Store"
+            if ds_store.is_file() and not ds_store.is_symlink():
+                ds_store.unlink()
+            try:
+                wrapper.rmdir()
+            except OSError:
+                pass
+    return show_folder
+
+
 def prepare_hbomax_media_group(
     meta: Metadata,
     group: HBOMaxMediaGroup,
     settings: dict[str, Any],
+    explicit_show_folder: Path | None = None,
     skip_existing: bool = False,
 ) -> HBOMaxMediaGroup:
     rename = bool(settings.get("hbomax_series_rename_enabled", True))
@@ -3001,7 +3040,9 @@ def prepare_hbomax_media_group(
     if not (rename or organize):
         return group
     destination = (
-        jellyfin_season_folder(hbomax_show_folder(group.folder, meta), group.season)
+        jellyfin_season_folder(
+            explicit_show_folder or hbomax_show_folder(group.folder, meta), group.season
+        )
         if organize else group.folder
     )
     base = hbomax_target_base(meta, group) if rename else group.stem
@@ -3344,14 +3385,20 @@ def save_hbomax_series_metadata(
     if not matches:
         return []
     saved: list[Path] = []; bundled: set[Path] = set(); trailer_for: dict[Path, Metadata] = {}
+    explicit_show_folder = hbomax_explicit_show_folder(explicit_folder, meta)
+    source_folders = {group.folder for group, _record in matches}
     for group, record in matches:
         episode_meta = meta if (
             meta.media_kind.casefold() == "episode" and meta.season_number == str(group.season) and meta.episode_number == str(group.episode)
         ) else hbomax_episode_metadata(meta, record)
         prepared = prepare_hbomax_media_group(
-            episode_meta, group, settings, skip_existing=skip_existing
+            episode_meta,
+            group,
+            settings,
+            explicit_show_folder=explicit_show_folder,
+            skip_existing=skip_existing,
         )
-        show_folder = hbomax_show_folder(prepared.folder, episode_meta)
+        show_folder = explicit_show_folder or hbomax_show_folder(prepared.folder, episode_meta)
         if show_folder not in bundled:
             saved.extend(ensure_hbomax_series_bundle(meta if meta.media_kind.casefold() == "series" else episode_meta, show_folder)); bundled.add(show_folder)
         trailer_for[show_folder] = hbomax_parent_series_meta(meta if meta.media_kind.casefold() == "series" else episode_meta)
@@ -3369,8 +3416,34 @@ def save_hbomax_series_metadata(
     for folder, series in trailer_for.items():
         saved.extend(save_hbomax_trailer(series, folder))
         saved.extend(save_hbomax_extra_videos(series, folder))
+    cleanup_hbomax_source_folders(source_folders, explicit_show_folder)
     print(f"HBO Max series mode found {len(matches)} local episode(s) and saved {len(saved)} item(s).")
     return saved
+
+
+def cleanup_hbomax_source_folders(folders: set[Path], show_folder: Path | None) -> list[Path]:
+    """Remove only HBO Max staging folders proven empty after exact handoffs."""
+    removed: list[Path] = []
+    canonical = show_folder.resolve() if show_folder else None
+    for folder in sorted({path.resolve() for path in folders}, key=lambda path: len(path.parts), reverse=True):
+        if not folder.is_dir() or folder.is_symlink():
+            continue
+        if canonical and (folder == canonical or canonical in folder.parents):
+            continue
+        entries = list(folder.iterdir())
+        if any(entry.name != ".DS_Store" for entry in entries):
+            continue
+        ds_store = folder / ".DS_Store"
+        if ds_store.exists() and ds_store.is_file() and not ds_store.is_symlink():
+            ds_store.unlink()
+        try:
+            folder.rmdir()
+        except OSError:
+            continue
+        removed.append(folder)
+    if removed:
+        print(f"HBO Max cleanup removed {len(removed)} empty source folder(s).")
+    return removed
 
 
 def amazon_prime_series_enabled(
