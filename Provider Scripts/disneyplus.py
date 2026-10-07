@@ -72,6 +72,14 @@ def series_metadata(hero: dict[str, Any], details: dict[str, Any], episodes: dic
     start_year, end_year, current = release_years(release)
     records = episode_records(episodes, title)
     seasons = episodes.get("seasons") if isinstance(episodes.get("seasons"), list) else []
+    advertised_text = number_text(hero.get("seasonsAvailable"))
+    advertised_count = int(advertised_text) if advertised_text.isdigit() else len(seasons)
+    discovered_seasons = {int(record["season"]) for record in records}
+    if advertised_count and len(discovered_seasons) < advertised_count:
+        raise ValueError(
+            "Disney+ exposed fewer episode-guide seasons than it advertised; "
+            "the public series guide may be incomplete."
+        )
     icons = detail_icon_labels(hero)
     rating = content_rating(hero, details)
     directors, cast, creators = credits_from_details(details.get("credits"))

@@ -25,6 +25,109 @@ base = load_base()
 
 
 class QueueModeContractTests(unittest.TestCase):
+    def test_every_series_provider_escapes_staging_wrappers_and_reuses_one_root(self):
+        cases = [
+            ("BBC iPlayer", base.bbc_queue_series_folder_name, {"BBC iPlayer"}),
+            ("Crunchyroll", base.crunchyroll_series_folder_name, {"Crunchyroll"}),
+            ("Disney+", base.disneyplus_series_folder_name, {"Disney+"}),
+            ("HBO Max", base.hbomax_series_folder_name, {"HBOMax"}),
+            ("Netflix", base.netflix_series_folder_name, {"Netflix"}),
+            ("Amazon Prime Video", base.amazon_prime_series_folder_name, {"Amazon Prime Video"}),
+            ("PBS KIDS", base.pbs_kids_series_folder_name, {"PBS KIDS"}),
+            ("Paramount+", base.paramountplus_series_folder_name, {"ParamountPlus"}),
+        ]
+        for provider, folder_name, provider_names in cases:
+            with self.subTest(provider=provider), tempfile.TemporaryDirectory() as temp:
+                provider_root = Path(temp) / next(iter(provider_names))
+                wrapper = provider_root / "Example Show S02 1080p WEB-DL"
+                wrapper.mkdir(parents=True)
+                incoming = wrapper / "manifest.mkv"
+                incoming.write_bytes(b"video")
+                meta = base.Metadata(
+                    source_url="https://example.test/show", source_site=provider,
+                    media_kind="episode", title="Example Show", show_title="Example Show",
+                    series_start_year="2025", series_end_year="2026", series_is_current=True,
+                )
+                expected = provider_root / folder_name(meta)
+                resolved = base.provider_handoff_show_folder(
+                    str(incoming), meta, folder_name(meta), provider_names
+                )
+                self.assertEqual(resolved, expected.resolve())
+                expected.mkdir()
+                (expected / "tvshow.nfo").write_text("series", encoding="utf-8")
+                meta.series_is_current = False
+                self.assertEqual(
+                    base.provider_handoff_show_folder(
+                        str(incoming), meta, folder_name(meta), provider_names
+                    ),
+                    expected.resolve(),
+                )
+
+    def test_exact_handoff_cleanup_removes_only_an_empty_staging_wrapper(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            wrapper = root / "Example Show_2026-10-06_12-00-00"
+            wrapper.mkdir()
+            supplied = wrapper / "manifest.mkv"
+            show = root / "Example Show (2025-)"
+            show.mkdir()
+            supplied.write_bytes(b"video")
+            supplied.unlink()
+            self.assertEqual(base.cleanup_empty_handoff_wrapper(str(supplied), show), [wrapper.resolve()])
+            self.assertFalse(wrapper.exists())
+
+    def test_lagging_provider_preparers_use_the_shared_handoff_root(self):
+        cases = [
+            (
+                "BBC iPlayer", base.prepare_bbc_queue_media_group,
+                lambda folder, stem, video: base.BBCMediaGroup(folder, stem, 2, 1, "episode-id", "Return", [video]),
+                base.bbc_queue_series_folder_name, {"BBC iPlayer"},
+            ),
+            (
+                "Crunchyroll", base.prepare_crunchyroll_media_group,
+                lambda folder, stem, video: base.CrunchyrollMediaGroup(folder, stem, 2, 1, [video]),
+                base.crunchyroll_series_folder_name, {"Crunchyroll"},
+            ),
+            (
+                "Disney+", base.prepare_disneyplus_media_group,
+                lambda folder, stem, video: base.DisneyPlusMediaGroup(folder, stem, 2, 1, [video]),
+                base.disneyplus_series_folder_name, {"Disney+"},
+            ),
+            (
+                "Amazon Prime Video", base.prepare_amazon_prime_media_group,
+                lambda folder, stem, video: base.AmazonPrimeMediaGroup(folder, stem, 2, 1, [video]),
+                base.amazon_prime_series_folder_name, {"Amazon Prime Video"},
+            ),
+            (
+                "PBS KIDS", base.prepare_pbs_kids_media_group,
+                lambda folder, stem, video: base.PBSKidsMediaGroup(folder, stem, 2, 1, [video]),
+                base.pbs_kids_series_folder_name, {"PBS KIDS"},
+            ),
+        ]
+        for provider, prepare, make_group, folder_name, provider_names in cases:
+            with self.subTest(provider=provider), tempfile.TemporaryDirectory() as temp:
+                provider_root = Path(temp) / next(iter(provider_names))
+                wrapper = provider_root / "Example Show Season 2 WEB-DL"
+                wrapper.mkdir(parents=True)
+                incoming = wrapper / "manifest.mkv"
+                incoming.write_bytes(b"video")
+                meta = base.Metadata(
+                    source_url="https://example.test/episode", source_site=provider,
+                    media_kind="episode", title="Example Show", show_title="Example Show",
+                    season_number="2", episode_number="1", episode_title="Return",
+                    series_start_year="2025", series_end_year="2026", series_is_current=True,
+                )
+                show = base.provider_handoff_show_folder(
+                    str(incoming), meta, folder_name(meta), provider_names
+                )
+                prepared = prepare(
+                    meta, make_group(wrapper, incoming.stem, incoming), {},
+                    explicit_show_folder=show,
+                )
+                self.assertEqual(prepared.folder, show / "Season 02")
+                self.assertTrue((show / "Season 02").is_dir())
+                self.assertFalse(any(wrapper.glob("manifest*")))
+
     def test_series_providers_process_two_exact_files_and_reuse_one_series_root(self):
         cases = [
             ("Crunchyroll", base.CrunchyrollMediaGroup, base.prepare_crunchyroll_media_group, base.crunchyroll_series_folder_name),

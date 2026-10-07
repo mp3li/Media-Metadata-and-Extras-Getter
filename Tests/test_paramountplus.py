@@ -33,6 +33,12 @@ paramountplus = load_module("test_paramountplus_provider", ROOT / "Provider Scri
 base = load_module("test_paramountplus_base", ROOT / "Base Script" / "media_metadata_and_extras_getter_base.py")
 
 
+class FixedDate(date):
+    @classmethod
+    def today(cls):
+        return cls(2026, 9, 1)
+
+
 SHOW_PAGE = """
 <meta property="og:title" content="SpongeBob SquarePants - Nickelodeon - Watch on Paramount Plus">
 <meta name="description" content="A square yellow sponge lives in a pineapple under the sea.">
@@ -104,11 +110,18 @@ EPISODE_PAGE = """
 
 
 class ParamountPlusProviderTests(unittest.TestCase):
+    def setUp(self):
+        self.date_patcher = patch.object(paramountplus, "date", FixedDate)
+        self.date_patcher.start()
+        self.addCleanup(self.date_patcher.stop)
+
     def extract_episode(self):
         def fixture(url: str, timeout: int = 25):
             return SHOW_PAGE if url == SHOW_URL else EPISODE_PAGE
 
-        with patch.object(paramountplus, "fetch_text", side_effect=fixture), patch.object(
+        with patch.object(paramountplus, "date", FixedDate), patch.object(
+            paramountplus, "fetch_text", side_effect=fixture
+        ), patch.object(
             paramountplus,
             "paramount_catalog_poster",
             return_value="https://img.example/catalog-poster_1400x2100.jpg",

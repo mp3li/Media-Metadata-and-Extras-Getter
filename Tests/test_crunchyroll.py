@@ -151,6 +151,14 @@ def api_fixture(path: str, timeout: int = 25):
 
 
 class CrunchyrollProviderTests(unittest.TestCase):
+    def test_season_without_provider_id_is_rejected_as_partial(self):
+        with patch.object(
+            crunchyroll, "api_get",
+            return_value={"data": [{"season_number": 2, "id": "", "versions": []}]},
+        ):
+            with self.assertRaisesRegex(ValueError, "without a usable season ID"):
+                crunchyroll.series_episode_guide(SERIES_ID)
+
     def extract_series(self):
         with patch.object(crunchyroll, "api_get", side_effect=api_fixture):
             return crunchyroll.extract_series_metadata(SERIES_ID)

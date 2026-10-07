@@ -243,7 +243,10 @@ def series_episode_guide(series_id: str, timeout: int = 25) -> list[dict[str, An
         season_number = int_value(season.get("season_number")) or int_value(season.get("season_sequence_number")) or 1
         season_id = preferred_version_id(season.get("versions"), fallback=clean_text(season.get("id")), prefer_original=True)
         if not season_id:
-            continue
+            raise ValueError(
+                f"Crunchyroll exposed Season {season_number} without a usable season ID; "
+                "the episode guide may be incomplete."
+            )
         for episode in data_list(api_get(f"seasons/{season_id}/episodes", timeout=timeout)):
             record = episode_record({}, episode)
             if record:

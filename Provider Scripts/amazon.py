@@ -136,8 +136,13 @@ def extract_prime_metadata(url: str, timeout: int = 25) -> dict[str, Any]:
         season_state = prime_state(page, "atf")
         season_header = first_detail(season_state, "headerDetail")
         season_url = next(url_value for number, url_value in season_links if number == season_number)
+        season_records = prime_episode_records(page, season_number)
+        if not season_header or not season_records:
+            raise ValueError(
+                f"Prime Video did not expose a complete public guide for Season {season_number}."
+            )
         season_headers.append((season_number, season_header, season_url))
-        records.extend(prime_episode_records(page, season_number))
+        records.extend(season_records)
     records = dedupe_records(records)
     if not records:
         raise ValueError("Prime Video page did not expose a public episode guide.")

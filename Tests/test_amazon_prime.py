@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 import importlib.util
 import sys
 import tempfile
@@ -136,6 +137,18 @@ PAGES = {
 
 
 class AmazonPrimeProviderTests(unittest.TestCase):
+    def test_advertised_season_without_episode_guide_is_rejected(self):
+        first = page(1, "SEASON0001", "EPISODE001", 2025)
+        broken_second = copy.deepcopy(page(2, "SEASON0002", "EPISODE002", 2026))
+        broken_second["init"]["preparations"]["body"]["btf"]["state"]["detail"]["detail"] = {}
+
+        def fixture(url: str, timeout: int = 25):
+            return broken_second if "SEASON0002" in url else first
+
+        with patch.object(amazon, "prime_page", side_effect=fixture):
+            with self.assertRaisesRegex(ValueError, "complete public guide for Season 2"):
+                amazon.extract_prime_metadata(SEASON_1)
+
     def extract(self, url: str):
         with patch.object(amazon, "prime_page", side_effect=lambda page_url, timeout=25: PAGES[amazon.prime_compact_id(page_url)]):
             return amazon.extract_metadata(url)

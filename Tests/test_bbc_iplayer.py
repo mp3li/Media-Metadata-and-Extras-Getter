@@ -5,6 +5,7 @@ import json
 import sys
 import tempfile
 import unittest
+from datetime import date
 from pathlib import Path
 from unittest.mock import patch
 
@@ -23,6 +24,12 @@ def load_module(name: str, path: Path):
 
 bbc = load_module("test_bbc_queue_provider", ROOT / "Provider Scripts" / "bbc_iplayer.py")
 base = load_module("test_bbc_queue_base", ROOT / "Base Script" / "media_metadata_and_extras_getter_base.py")
+
+
+class FixedDate(date):
+    @classmethod
+    def today(cls):
+        return cls(2026, 9, 1)
 
 
 def related_episode(identifier: str, season: int, episode: int, title: str, released: str):
@@ -79,7 +86,9 @@ class BBCQueueModeTests(unittest.TestCase):
             related_episode("m0000002", 1, 2, "Second", "2025-01-08"),
         ])
         second = state("slice-2", [related_episode("m0000003", 2, 1, "Return", "2026-08-15")])
-        with patch.object(bbc, "fetch_text", side_effect=lambda url, timeout=25: page(second if "slice-2" in url else first)):
+        with patch.object(bbc, "date", FixedDate), patch.object(
+            bbc, "fetch_text", side_effect=lambda url, timeout=25: page(second if "slice-2" in url else first)
+        ):
             return bbc.extract_metadata(EPISODE_URL)
 
     def test_episode_link_builds_complete_multi_slice_catalog_and_provider_tag(self):

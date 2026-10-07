@@ -102,6 +102,18 @@ class DisneyPlusProviderTests(unittest.TestCase):
         with patch.object(disneyplus, "fetch_text", return_value=page_fixture()):
             return disneyplus.extract_metadata(url)
 
+    def test_advertised_missing_season_is_rejected(self):
+        payload = next_data()
+        hero = payload["props"]["pageProps"]["stitchDocument"]["mainContent"][0]
+        hero["seasonsAvailable"] = "2 Seasons"
+        page = (
+            f'<link rel="canonical" href="{SERIES_URL}">'
+            f'<script id="__NEXT_DATA__" type="application/json">{json.dumps(payload)}</script>'
+        )
+        with patch.object(disneyplus, "fetch_text", return_value=page):
+            with self.assertRaisesRegex(ValueError, "fewer episode-guide seasons"):
+                disneyplus.extract_metadata(SERIES_URL)
+
     def test_series_metadata_uses_complete_public_guide_and_jellyfin_art(self):
         item = self.extract(SERIES_URL)
         self.assertEqual(item["media_kind"], "series")
